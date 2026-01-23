@@ -28,6 +28,7 @@ import {
 import type { SessionRow } from "./store.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "./chatgpt/oauth.js";
 import { getIdentity } from "./cloud/store.js";
+import { createProxyToken } from "./cloud/proxy.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 interface RunningProcess {
@@ -94,6 +95,39 @@ export class SessionManager {
     if (!out.LANG) out.LANG = locale;
     if (!out.LC_ALL) out.LC_ALL = locale;
     return out;
+  }
+
+  /**
+   * Apply cloud proxy environment variables for local sessions.
+   * This allows local/WebSocket sessions to use the centralized API key
+   * configured in [cloud.proxy] without needing to set OPENAI_API_KEY in config.
+   */
+  private applyCloudProxyForLocalSession(
+    env: Record<string, string>,
+    identityId: string,
+  ): Record<string, string> {
+    const proxy = this.config.cloud?.proxy;
+    if (!proxy?.enabled || !proxy.openai_api_key || !proxy.shared_secret) {
+      return env;
+    }
+
+    // Always override with cloud proxy (force cloud proxy mode)
+    // Generate proxy token
+    const token = createProxyToken(proxy.shared_secret, identityId, proxy.token_ttl_ms);
+
+    // Build proxy URL
+    const baseUrl = this.config.cloud?.public_base_url ?? `http://127.0.0.1:${this.config.bot.port}`;
+    const trimmedBase = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+    const proxyUrl = `${trimmedBase}${proxy.openai_path}`;
+
+    this.logger.info(`[session] cloud proxy applied for local session identity=${identityId}`);
+
+    return {
+      ...env,
+      OPENAI_API_KEY: token,
+      OPENAI_BASE_URL: proxyUrl,
+      OPENAI_API_BASE: proxyUrl,
+    };
   }
 
   private async resolveSessionLanguageById(sessionId: string): Promise<UserLanguage> {
@@ -223,7 +257,8 @@ export class SessionManager {
       const homeDir = adapter.resolveHomeDir(sessionsRoot);
       await adapter.ensureSessionsRootExists(sessionsRoot);
       const envSeed = this.applyLanguageEnv(opts.envOverrides ?? {}, language);
-      const envOverrides = await this.maybePrepareChatgptProxy(session, envSeed);
+      const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envSeed);
+      const envOverrides = this.applyCloudProxyForLocalSession(envWithChatgpt, opts.userId);
 
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir}`,
@@ -304,6 +339,7 @@ export class SessionManager {
     await adapter.ensureSessionsRootExists(sessionsRoot);
     const envSeed = this.applyLanguageEnv(envOverrides ?? {}, this.resolveSessionLanguage(session));
     const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envSeed);
+    const envWithCloudProxy = this.applyCloudProxyForLocalSession(envWithChatgpt, session.created_by_user_id);
 
     // Ensure offsets exist.
     const existingOffsets = await listSessionOffsets(this.db, session.id);
@@ -337,7 +373,7 @@ export class SessionManager {
         sessionId: session.codex_session_id,
         prompt: agentPrompt,
         homeDir,
-        extraEnv: envWithChatgpt,
+        extraEnv: envWithCloudProxy,
         extraArgs: (await this.playwrightCliArgs(session.agent)) ?? undefined,
       });
     } catch (e) {
