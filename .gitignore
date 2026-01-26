@@ -33,6 +33,7 @@ references/
 data
 config.toml
 config2.toml
+config.e2e.toml
 .codex
 .claude
 
