@@ -65,7 +65,7 @@ import { createWriteStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { pipeline } from "node:stream/promises";
 import path from "node:path";
-import { getLanguageLabel, getOtherLanguage, isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";
@@ -403,28 +403,6 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
-  const buildLanguageToggleTelegram = (lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
-    return { inline_keyboard: [[{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]] };
-  };
-
-  const buildLanguageToggleSlackBlocks = (lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
-    return [
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
-          },
-        ],
-      },
-    ];
-  };
-
   const uiConfig = config.cloud?.ui ?? null;
 
   const extractPlaywrightTool = (caption?: string): string | null => {
@@ -605,7 +583,6 @@ export async function createBotService(deps: BotServiceDeps) {
         await telegram.sendMessage({
           chatId,
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -618,8 +595,6 @@ export async function createBotService(deps: BotServiceDeps) {
       await slack.postMessageDetailed({
         channel,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     } catch (e) {
       logger.warn(`Failed to send GitHub connect message: ${String(e)}`);
@@ -682,7 +657,6 @@ export async function createBotService(deps: BotServiceDeps) {
         await telegram.sendMessage({
           chatId,
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -695,8 +669,6 @@ export async function createBotService(deps: BotServiceDeps) {
       await slack.postMessageDetailed({
         channel,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     } catch (e) {
       logger.warn(`Failed to send ChatGPT connect message: ${String(e)}`);
@@ -714,7 +686,6 @@ export async function createBotService(deps: BotServiceDeps) {
     includeReview: boolean;
     includeCommit: boolean;
     includeStopSandbox: boolean;
-    includeLangToggle?: boolean;
     currentLang?: UserLanguage;
   }) => {
     const lang = opts.currentLang ?? "en";
@@ -727,10 +698,6 @@ export async function createBotService(deps: BotServiceDeps) {
     if (opts.includeReview) actionRow.push({ text: t("button.review", lang), callback_data: `review:${opts.sessionId}` });
     if (opts.includeCommit) actionRow.push({ text: t("button.commit", lang), callback_data: `commit:${opts.sessionId}` });
     if (actionRow.length > 0) rows.push(actionRow);
-    if (opts.includeLangToggle) {
-      const nextLang = getOtherLanguage(lang);
-      rows.push([{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }]);
-    }
     return rows.length > 0 ? { inline_keyboard: rows } : undefined;
   };
 
@@ -740,7 +707,6 @@ export async function createBotService(deps: BotServiceDeps) {
     includeReview: boolean;
     includeCommit: boolean;
     includeStopSandbox: boolean;
-    includeLangToggle?: boolean;
     currentLang?: UserLanguage;
   }) => {
     const lang = opts.currentLang ?? "en";
@@ -779,20 +745,10 @@ export async function createBotService(deps: BotServiceDeps) {
         value: opts.sessionId,
       });
     }
-    if (opts.includeLangToggle) {
-      const nextLang = getOtherLanguage(lang);
-      elements.push({
-        type: "button",
-        text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-        action_id: "switch_language",
-        value: nextLang,
-      });
-    }
     return elements.length > 0 ? [{ type: "actions", elements }] : undefined;
   };
 
   const buildCommitProposalTelegramKeyboard = (proposalId: string, lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
     return {
       inline_keyboard: [
         [
@@ -800,13 +756,11 @@ export async function createBotService(deps: BotServiceDeps) {
           { text: t("button.commit_push", lang), callback_data: `cpr:${proposalId}:push` },
         ],
         [{ text: t("button.create_pr", lang), callback_data: `cpr:${proposalId}:pr` }],
-        [{ text: getLanguageLabel(nextLang), callback_data: `lang:${nextLang}` }],
       ],
     };
   };
 
   const buildCommitProposalSlackBlocks = (proposalId: string, lang: UserLanguage) => {
-    const nextLang = getOtherLanguage(lang);
     return [
       {
         type: "actions",
@@ -829,12 +783,6 @@ export async function createBotService(deps: BotServiceDeps) {
             text: { type: "plain_text", text: t("button.create_pr", lang) },
             action_id: "commit_pr",
             value: proposalId,
-          },
-          {
-            type: "button",
-            text: { type: "plain_text", text: getLanguageLabel(nextLang) },
-            action_id: "switch_language",
-            value: nextLang,
           },
         ],
       },
@@ -946,7 +894,6 @@ export async function createBotService(deps: BotServiceDeps) {
           chatId,
           messageThreadId: Number(space),
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
@@ -956,12 +903,11 @@ export async function createBotService(deps: BotServiceDeps) {
           chatId,
           replyToMessageId: Number(space),
           text,
-          replyMarkup: buildLanguageToggleTelegram(lang),
           priority: "user",
         });
         return;
       }
-      await telegram.sendMessage({ chatId, text, replyMarkup: buildLanguageToggleTelegram(lang), priority: "user" });
+      await telegram.sendMessage({ chatId, text, priority: "user" });
       return;
     }
     if (pending.platform === "slack") {
@@ -971,8 +917,6 @@ export async function createBotService(deps: BotServiceDeps) {
         channel: pending.chatId,
         thread_ts: threadTs,
         text,
-        blocks: buildLanguageToggleSlackBlocks(lang),
-        blocksOnLastChunk: false,
       });
     }
   };
@@ -1062,11 +1006,17 @@ export async function createBotService(deps: BotServiceDeps) {
 
   const sendSessionCompleteNotice = async (opts: {
     sessionId: string;
-    session: { platform: string; chat_id: string; space_id: string; project_id: string | null; language?: string | null };
+    session: {
+      platform: string;
+      chat_id: string;
+      space_id: string;
+      space_emoji: string | null;
+      project_id: string | null;
+      language?: string | null;
+    };
     actionsDisabled: boolean;
-    telegramTopicSession: boolean;
   }) => {
-    const { sessionId, session, actionsDisabled, telegramTopicSession } = opts;
+    const { sessionId, session, actionsDisabled } = opts;
     const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
     const lang = resolveSessionLanguage(session);
     const text = t("session.complete", lang);
@@ -1074,49 +1024,110 @@ export async function createBotService(deps: BotServiceDeps) {
     if (session.platform === "telegram") {
       if (!telegram) return;
       const chatId = Number(session.chat_id);
-      const space = Number(session.space_id);
-      if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       const replyMarkup = buildTelegramInlineKeyboard({
         sessionId,
         includeKill: false,
         includeReview: !actionsDisabled,
         includeCommit: !actionsDisabled,
         includeStopSandbox: !actionsDisabled && isCloudSession,
-        includeLangToggle: true,
         currentLang: lang,
       });
-      const priority = "user" as const;
+      if (Number.isNaN(chatId)) return;
+      const sendFallback = async () => {
+        const space = Number(session.space_id);
+        if (Number.isFinite(space)) {
+          try {
+            const sent = await telegram.sendMessageSingleStrict(
+              isTelegramTopicSession(session)
+                ? {
+                    chatId,
+                    messageThreadId: space,
+                    text,
+                    replyMarkup,
+                    priority: "user",
+                    forcePrimary: true,
+                  }
+                : {
+                    chatId,
+                    replyToMessageId: space,
+                    text,
+                    replyMarkup,
+                    priority: "user",
+                    forcePrimary: true,
+                  },
+            );
+            if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
+            return;
+          } catch {
+            // Fall through to a plain message.
+          }
+        }
+        const sent = await telegram.sendMessage({
+          chatId,
+          text,
+          replyMarkup,
+          priority: "user",
+          forcePrimary: true,
+        });
+        if (sent) trackTelegramMessage(sessionId, chatId, sent.message_id);
+      };
+      const messageId = lastTelegramMessageId.get(sessionId);
+      if (!messageId) {
+        try {
+          await sendFallback();
+        } catch {
+          // Ignore failures.
+        }
+        return;
+      }
       try {
-        const sent = await telegram.sendMessageSingleStrict(
-          telegramTopicSession
-            ? { chatId, messageThreadId: space, text, replyMarkup, priority, forcePrimary: true }
-            : { chatId, replyToMessageId: space, text, replyMarkup, priority, forcePrimary: true },
-        );
-        trackTelegramMessage(sessionId, chatId, sent.message_id);
+        await telegram.editMessageReplyMarkup({
+          chatId,
+          messageId,
+          replyMarkup,
+          priority: "user",
+        });
       } catch {
-        // Ignore failures.
+        try {
+          await sendFallback();
+        } catch {
+          // Ignore failures.
+        }
       }
       return;
     }
 
     if (session.platform === "slack") {
       if (!slack) return;
-      const channel = session.chat_id;
-      const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
+      const blocks = buildSlackButtons({
+        sessionId,
+        includeKill: false,
+        includeReview: !actionsDisabled,
+        includeCommit: !actionsDisabled,
+        includeStopSandbox: !actionsDisabled && isCloudSession,
+        currentLang: lang,
+      });
+      const last = lastSlackMessage.get(sessionId);
+      if (last) {
+        try {
+          await slack.updateMessage({
+            channel: session.chat_id,
+            ts: last.ts,
+            text: last.text,
+            blocks,
+          });
+          return;
+        } catch {
+          // Fall through to a new message.
+        }
+      }
       try {
+        const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
         const posted = await slack.postMessageDetailed({
-          channel,
+          channel: session.chat_id,
           thread_ts: threadTs,
           text,
-          blocks: buildSlackButtons({
-            sessionId,
-            includeKill: false,
-            includeReview: !actionsDisabled,
-            includeCommit: !actionsDisabled,
-            includeStopSandbox: !actionsDisabled && isCloudSession,
-            includeLangToggle: true,
-            currentLang: lang,
-          }),
+          blocks,
           blocksOnLastChunk: false,
         });
         if (posted.lastTs && posted.lastText !== null) {
@@ -1243,7 +1254,6 @@ export async function createBotService(deps: BotServiceDeps) {
       const space = Number(session.space_id);
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
       const text = formatPlanMessageTelegramHtml({ plan, explanation, lang });
-      const replyMarkup = buildLanguageToggleTelegram(lang);
       const existing = planTelegramMessageId.get(sessionId);
       if (existing) {
         try {
@@ -1252,7 +1262,6 @@ export async function createBotService(deps: BotServiceDeps) {
             messageId: existing,
             text,
             parseMode: "HTML",
-            replyMarkup,
             priority: "user",
           });
           return;
@@ -1269,7 +1278,6 @@ export async function createBotService(deps: BotServiceDeps) {
                 messageThreadId: space,
                 text,
                 parseMode: "HTML",
-                replyMarkup,
                 priority: "user",
                 forcePrimary: true,
               }
@@ -1278,7 +1286,6 @@ export async function createBotService(deps: BotServiceDeps) {
                 replyToMessageId: space,
                 text,
                 parseMode: "HTML",
-                replyMarkup,
                 priority: "user",
                 forcePrimary: true,
               },
@@ -1298,11 +1305,10 @@ export async function createBotService(deps: BotServiceDeps) {
       const channel = session.chat_id;
       const threadTs = config.slack?.session_mode === "thread" ? session.space_id : undefined;
       const text = formatPlanMessageSlack({ plan, explanation, lang });
-      const blocks = buildLanguageToggleSlackBlocks(lang);
       const existing = planSlackMessageTs.get(sessionId);
       if (existing) {
         try {
-          await slack.updateMessage({ channel, ts: existing, text, blocks });
+          await slack.updateMessage({ channel, ts: existing, text });
           return;
         } catch {
           planSlackMessageTs.delete(sessionId);
@@ -1313,8 +1319,6 @@ export async function createBotService(deps: BotServiceDeps) {
           channel,
           thread_ts: threadTs,
           text,
-          blocks,
-          blocksOnLastChunk: false,
         });
         if (posted.lastTs) planSlackMessageTs.set(sessionId, posted.lastTs);
       } catch {
@@ -1376,7 +1380,7 @@ export async function createBotService(deps: BotServiceDeps) {
         suppressFinalizeForSession.delete(sessionId);
         return;
       }
-      await sendSessionCompleteNotice({ sessionId, session, actionsDisabled, telegramTopicSession });
+      await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
       return;
     }
     if (message.type === "plan_update") {
@@ -1469,7 +1473,7 @@ export async function createBotService(deps: BotServiceDeps) {
           messageSent = true;
           return;
         }
-        await sendSessionCompleteNotice({ sessionId, session, actionsDisabled, telegramTopicSession });
+        await sendSessionCompleteNotice({ sessionId, session, actionsDisabled });
         messageSent = true;
         return;
       }
@@ -1486,7 +1490,6 @@ export async function createBotService(deps: BotServiceDeps) {
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
           includeStopSandbox: false,
-          includeLangToggle: true,
           currentLang: lang,
         });
 
@@ -1548,7 +1551,6 @@ export async function createBotService(deps: BotServiceDeps) {
           includeReview: includeReviewButton,
           includeCommit: includeCommitButton,
           includeStopSandbox: false,
-          includeLangToggle: true,
           currentLang: lang,
         });
         const posted = await slack.postMessageDetailed({ channel, thread_ts: threadTs, text, blocks, blocksOnLastChunk: false });

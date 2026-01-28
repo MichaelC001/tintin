@@ -16,6 +16,8 @@ export const en = {
   // Prompts
   "prompt.language_directive":
     "You must respond in English. Do not mention language choice, switching, or translation. Avoid meta commentary about the response language. Use English for user-facing planning, reasoning summaries, progress, and explanations; keep code/paths/commands/logs verbatim.",
+  "prompt.search_directive":
+    "For any web search/browsing, you must use Hyperbrowser via Playwright MCP. Do not use curl/wget/raw HTTP. If Hyperbrowser is unavailable, explain and stop.",
 
   // Wizard
   "wizard.choose_project": "Choose a project to start a {agent} session.",
@@ -48,6 +50,7 @@ export const en = {
   "actions.none_runs": "No runs found.",
   "command.dm_only": "This command is only available in direct messages. Use {cmd}.",
   "callback.unsupported_context": "Unsupported callback context.",
+  "search.policy_warning": "Search policy enforced: curl/wget disabled. Use Hyperbrowser (Playwright MCP).",
 
   // Agents
   "agent.claude_code.not_configured": "Claude Code is not configured.",
@@ -189,6 +192,7 @@ export const en = {
   "cloud.help.notes": "Notes:",
   "cloud.help.note_group": "- In group chats, share repos with {cmd} first.",
   "cloud.help.note_disconnect": "- Use {cmd} to disconnect a GitHub App.",
+  "cloud.help.note_lang": "- Use {cmd} to switch language for the current session.",
   "cloud.help.note_slack_mention": "- In Slack channels, mention the bot to issue commands.",
 
   "connect.dm_only": "Please run {cmd} in a direct message.",
@@ -487,6 +491,11 @@ export const en = {
   "time.years_ago": "{n}y ago",
 
   // Language
+  "lang.usage": "Usage: {cmd} (en or zh). Run it in a session thread or reply to a session message.",
+  "lang.session_required": "No active session found here. Run {cmd} in a session thread or reply to a session message.",
+  "lang.invalid": "Unsupported language. Use en or zh.",
+  "lang.default_set_zh": "Switched to Chinese 🇨🇳.",
+  "lang.default_set_en": "Switched to English 🇬🇧.",
   "lang.switched_zh": "Switched to Chinese 🇨🇳",
   "lang.switched_en": "Switched to English 🇬🇧",
 } as const;

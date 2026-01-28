@@ -16,6 +16,8 @@ export const zh = {
   // Prompts
   "prompt.language_directive":
     "你必须用中文回答。禁止描述或提及“切换/使用中文/翻译”等元信息；不要输出任何关于语言选择的说明。除非是代码、命令、路径、专有名词或原始日志片段，禁止使用英文。面向用户的计划、推理、进度与解释必须是中文，保持简洁直接。",
+  "prompt.search_directive":
+    "所有网页搜索/浏览必须使用 Hyperbrowser（Playwright MCP），禁止使用 curl/wget/直接 HTTP。若 Hyperbrowser 不可用，请说明原因并停止。",
 
   // Wizard
   "wizard.choose_project": "选择一个项目来启动 {agent} 会话。",
@@ -48,6 +50,7 @@ export const zh = {
   "actions.none_runs": "暂无运行记录。",
   "command.dm_only": "该命令仅支持私聊使用。请使用 {cmd}。",
   "callback.unsupported_context": "不支持的回调上下文。",
+  "search.policy_warning": "搜索策略已强制执行：curl/wget 已禁用，请使用 Hyperbrowser（Playwright MCP）。",
 
   // Agents
   "agent.claude_code.not_configured": "未配置 Claude Code。",
@@ -189,6 +192,7 @@ export const zh = {
   "cloud.help.notes": "注意事项：",
   "cloud.help.note_group": "- 群聊中先用 {cmd} 共享仓库。",
   "cloud.help.note_disconnect": "- 使用 {cmd} 断开 GitHub App。",
+  "cloud.help.note_lang": "- 使用 {cmd} 切换当前会话语言。",
   "cloud.help.note_slack_mention": "- Slack 频道中需要 @ 机器人执行命令。",
 
   "connect.dm_only": "请在私聊中使用 {cmd}。",
@@ -487,6 +491,11 @@ export const zh = {
   "time.years_ago": "{n} 年前",
 
   // Language
+  "lang.usage": "用法：{cmd}（en 或 zh）。请在会话线程中使用或回复会话消息。",
+  "lang.session_required": "当前上下文未找到会话，请在会话线程中使用 {cmd} 或回复会话消息。",
+  "lang.invalid": "不支持的语言参数，请使用 en 或 zh。",
+  "lang.default_set_zh": "已切换到中文 🇨🇳。",
+  "lang.default_set_en": "已切换到英文 🇬🇧。",
   "lang.switched_zh": "已切换到中文 🇨🇳",
   "lang.switched_en": "已切换到英文 🇬🇧",
 } as const;
