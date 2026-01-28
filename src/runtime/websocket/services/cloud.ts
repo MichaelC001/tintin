@@ -114,14 +114,18 @@ export class CloudRunService {
         });
       }
 
-      // Send run links
+      // Send run links (viewUrl immediately available)
       const viewUrl = this.linkBuilder.buildViewUrl(runId);
       this.wsManager.sendToConnection(connId, {
         type: 'run_links',
         runId,
         sessionId,
         viewUrl,
-        // vscodeUrl will be sent later when available via cloud manager
+      });
+
+      // Start background polling for VS Code URL (code-server takes time to start)
+      this.pollAndSendVscodeUrl(connId, runId, sessionId).catch((err) => {
+        this.logger.debug(`[ws][cloud] vscode poll error runId=${runId}: ${String(err)}`);
       });
 
       this.logger.info(
@@ -178,6 +182,11 @@ export class CloudRunService {
         viewUrl,
       });
 
+      // Try to get VS Code URL immediately, or start polling if not available
+      this.pollAndSendVscodeUrl(connId, runId, sessionId).catch((err) => {
+        this.logger.debug(`[ws][cloud] vscode poll error runId=${runId}: ${String(err)}`);
+      });
+
       this.logger.debug(`[ws][cloud] subscribed to run connId=${connId} runId=${runId} sessionId=${sessionId}`);
     } catch (err) {
       this.logger.error(`[ws][cloud] handleSubscribeRun error connId=${connId}: ${String(err)}`);
@@ -205,5 +214,52 @@ export class CloudRunService {
     }
 
     return true;
+  }
+
+  /**
+   * Poll for VS Code tunnel URL and send run_links message when available.
+   * Runs in background - does not block the main flow.
+   *
+   * @param connId - WebSocket connection ID
+   * @param runId - Cloud run ID
+   * @param sessionId - Session ID for the cloud run
+   * @param maxAttempts - Maximum number of polling attempts (default: 15)
+   * @param intervalMs - Polling interval in milliseconds (default: 2000)
+   */
+  private async pollAndSendVscodeUrl(
+    connId: string,
+    runId: string,
+    sessionId: string,
+    maxAttempts = 15,
+    intervalMs = 2000,
+  ): Promise<void> {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // Check if connection is still alive
+      if (!this.wsManager.getConnection(connId)) {
+        this.logger.debug(`[ws][cloud] vscode poll stopped: connection closed connId=${connId}`);
+        return;
+      }
+
+      // Try to get VS Code tunnel URL
+      const tunnelUrl = await this.cloudManager.getVscodeUrl(sessionId).catch(() => null);
+      if (tunnelUrl) {
+        const vscodeUrl = this.linkBuilder.buildVscodeUrl(tunnelUrl);
+        this.wsManager.sendToConnection(connId, {
+          type: 'run_links',
+          runId,
+          sessionId,
+          vscodeUrl,
+        });
+        this.logger.debug(`[ws][cloud] vscode url sent connId=${connId} runId=${runId}`);
+        return;
+      }
+
+      // Wait before next attempt
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+
+    this.logger.debug(
+      `[ws][cloud] vscode poll exhausted after ${maxAttempts} attempts connId=${connId} runId=${runId}`,
+    );
   }
 }
