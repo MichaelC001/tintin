@@ -1,3 +1,8 @@
+import type { CloudRunWsStatus as CloudRunStatus, BrowserProvider } from '../cloud/types.js';
+
+// Re-export types for backward compatibility
+export type { CloudRunStatus, BrowserProvider };
+
 // ============ Client → Server Messages ============
 
 export interface AuthMessage {
@@ -214,8 +219,6 @@ export interface OAuthStartedMessage {
 
 // ============ Cloud Run Messages (Server → Client) ============
 
-export type CloudRunStatus = 'queued' | 'preparing' | 'cloning' | 'setting_up' | 'running' | 'finished' | 'error';
-
 export interface RunStatusMessage {
   type: 'run_status';
   runId: string;
@@ -229,6 +232,14 @@ export interface RunLinksMessage {
   sessionId: string;
   viewUrl?: string;
   vscodeUrl?: string;
+}
+
+export interface BrowserSessionMessage {
+  type: 'browser_session';
+  sessionId: string;
+  runId: string;
+  cdpUrl: string;
+  provider: BrowserProvider;
 }
 
 export type ServerMessage =
@@ -248,7 +259,8 @@ export type ServerMessage =
   | AuthStatusMessage
   | OAuthStartedMessage
   | RunStatusMessage
-  | RunLinksMessage;
+  | RunLinksMessage
+  | BrowserSessionMessage;
 
 // ============ Error Codes ============
 

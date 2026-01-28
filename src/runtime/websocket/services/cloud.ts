@@ -8,6 +8,7 @@ import { ErrorCodes } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { CloudLinkBuilder } from './linkBuilder.js';
 import { listReposForIdentity, getCloudRun } from '../../cloud/store.js';
+import { mapDbStatusToWsStatus } from '../../cloud/types.js';
 
 /**
  * CloudRunService - Handles WebSocket cloud run requests.
@@ -78,7 +79,7 @@ export class CloudRunService {
       const virtualSpaceId = `${Date.now()}`;
 
       // Start cloud run
-      const { runId, sessionId } = await this.cloudManager.startRun({
+      const { runId, sessionId, cdpUrl } = await this.cloudManager.startRun({
         identityId: dbIdentityId,
         platform: 'websocket',
         workspaceId: null,
@@ -101,6 +102,17 @@ export class CloudRunService {
         sessionId,
         runId,
       });
+
+      // Send browser session CDP URL if available
+      if (cdpUrl) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'browser_session',
+          sessionId,
+          runId,
+          cdpUrl,
+          provider: 'hyperbrowser',
+        });
+      }
 
       // Send run links
       const viewUrl = this.linkBuilder.buildViewUrl(runId);
@@ -154,7 +166,7 @@ export class CloudRunService {
       this.wsManager.sendToConnection(connId, {
         type: 'run_status',
         runId,
-        status: this.mapRunStatus(run.status),
+        status: mapDbStatusToWsStatus(run.status),
       });
 
       // Send run links
@@ -193,24 +205,5 @@ export class CloudRunService {
     }
 
     return true;
-  }
-
-  /**
-   * Map database run status to WebSocket CloudRunStatus.
-   */
-  private mapRunStatus(dbStatus: string): 'queued' | 'preparing' | 'cloning' | 'setting_up' | 'running' | 'finished' | 'error' {
-    switch (dbStatus) {
-      case 'queued':
-        return 'queued';
-      case 'running':
-        return 'running';
-      case 'finished':
-        return 'finished';
-      case 'error':
-      case 'killed':
-        return 'error';
-      default:
-        return 'preparing';
-    }
   }
 }
