@@ -55,6 +55,7 @@ import {
   type SessionRow,
 } from "../store.js";
 import { PineconeClient, type EmbeddingConfig } from "../pinecone.js";
+import { isRecord } from "../typeGuards.js";
 
 function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
@@ -74,10 +75,6 @@ type SnapshotCleanupConfig = {
 
 function shellQuote(value: string): string {
   return JSON.stringify(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function sanitizeBrowserbaseMetadataValue(value: unknown): string | number | boolean | null {
@@ -828,7 +825,7 @@ export class CloudManager {
     agent: SessionAgent;
     playground?: boolean;
     restoreSnapshotId?: string | null;
-  }): Promise<{ runId: string; sessionId: string }> {
+  }): Promise<{ runId: string; sessionId: string; cdpUrl: string | null }> {
     this.ensureEnabled();
     const isPlayground = opts.playground === true;
     if (opts.repoIds.length === 0 && !isPlayground) throw new Error("No repo selected.");
@@ -1057,7 +1054,11 @@ export class CloudManager {
         snapshot_id: setupSnapshotId ?? null,
       });
 
-      return { runId: run.id, sessionId: sessionId };
+      return {
+        runId: run.id,
+        sessionId: sessionId,
+        cdpUrl: this.hyperbrowserSessions.get(sessionId)?.wsEndpoint ?? null,
+      };
     } catch (e) {
       runStatus = "error";
       this.logger.warn(`[cloud] run failed id=${run.id}: ${String(e)}`);

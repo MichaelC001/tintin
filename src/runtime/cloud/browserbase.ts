@@ -1,17 +1,10 @@
 import type { PlaywrightMcpBrowserbaseSection } from "../config.js";
 import { fetchWithProxy } from "../httpClient.js";
+import { isRecord, getString } from "../typeGuards.js";
 
 export interface BrowserbaseSessionInfo {
   id: string;
   connectUrl: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function buildSessionPayload(

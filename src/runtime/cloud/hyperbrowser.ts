@@ -1,17 +1,10 @@
 import type { PlaywrightMcpHyperbrowserSection } from "../config.js";
 import { fetchWithProxy } from "../httpClient.js";
+import { isRecord, getString } from "../typeGuards.js";
 
 export interface HyperbrowserSessionInfo {
   id: string;
   wsEndpoint: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
 function normalizeBaseUrl(value: string): string {
