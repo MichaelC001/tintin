@@ -23,6 +23,13 @@ import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalL
 import { createProxyToken } from "./proxy.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { buildLocalizedPrompt } from "../prompt.js";
+import {
+  applySearchEnv,
+  buildSearchDirective,
+  buildSearchGuardBootstrapLines,
+  isHyperbrowserAvailable,
+  resolveSearchPolicy,
+} from "../searchPolicy.js";
 import { getAgentAdapter } from "../agents.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "../chatgpt/oauth.js";
 import {
@@ -1950,8 +1957,14 @@ export class CloudManager {
 
     const sessionId = crypto.randomUUID();
     const now = nowMs();
-      const language = await getUserLanguage(this.db, opts.platform, opts.userId);
-      const agentPrompt = buildLocalizedPrompt(opts.prompt, language);
+    const language = await getUserLanguage(this.db, opts.platform, opts.userId);
+    const searchPolicy = resolveSearchPolicy(this.config);
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
+    const guardDir = enforceSearch ? "/tmp/tintin-search-guard" : undefined;
+    const guardLines = enforceSearch ? buildSearchGuardBootstrapLines({ guardDir: guardDir! }) : [];
+    const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
+    const agentPrompt = buildLocalizedPrompt(opts.prompt, language, { searchDirective });
     await createSession(this.db, {
       id: sessionId,
       agent: opts.agent,
@@ -1987,11 +2000,17 @@ export class CloudManager {
       );
       envOverrides = this.applyProxyEnv(envOverrides, opts.identityId, opts.agent);
       envOverrides = this.applyLanguageEnv(envOverrides, language);
+      envOverrides = applySearchEnv(envOverrides, {
+        policy: searchPolicy,
+        hyperbrowserAvailable,
+        enforce: enforceSearch,
+        guardDir,
+      });
       if (opts.agent === "codex") {
         envOverrides = this.normalizeChatgptProxyEnv(sessionId, envOverrides);
       }
       this.logger.info(
-        `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length}`,
+        `[cloud] spawn agent=${opts.agent} session=${sessionId} cwd=${opts.projectPath} env_keys=${Object.keys(envOverrides).length} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
       let playwrightSetup: RemotePlaywrightSetup | null = null;
       if (this.isBrowserbaseEnabled()) {
@@ -2034,6 +2053,7 @@ export class CloudManager {
             workspace: opts.workspace,
             envOverrides,
             playwright: playwrightSetup,
+            extraBootstrapLines: guardLines,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -2423,6 +2443,7 @@ export class CloudManager {
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
+    extraBootstrapLines?: string[] | null;
   }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -2485,7 +2506,11 @@ export class CloudManager {
 
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
-    const combinedExtraLines = [...(opts.playwright?.bootstrapLines ?? []), ...chatgptLines];
+    const combinedExtraLines = [
+      ...(opts.extraBootstrapLines ?? []),
+      ...(opts.playwright?.bootstrapLines ?? []),
+      ...chatgptLines,
+    ];
     const bootstrap = this.buildRemoteBootstrap({
       promptFile,
       promptText,
@@ -2700,6 +2725,7 @@ export class CloudManager {
     workspace: CloudWorkspace;
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
+    extraBootstrapLines?: string[] | null;
   }): Promise<{ handle: RemoteHandle; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -2754,7 +2780,11 @@ export class CloudManager {
 
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
-    const combinedExtraLines = [...(opts.playwright?.bootstrapLines ?? []), ...chatgptLines];
+    const combinedExtraLines = [
+      ...(opts.extraBootstrapLines ?? []),
+      ...(opts.playwright?.bootstrapLines ?? []),
+      ...chatgptLines,
+    ];
     const bootstrap = this.buildRemoteBootstrap({
       promptFile,
       promptText,
@@ -3092,9 +3122,21 @@ export class CloudManager {
       run.identity_id,
       session.agent,
     );
-    const envOverrides = this.applyLanguageEnv(envOverridesBase, this.resolveSessionLanguage(session));
+    const language = this.resolveSessionLanguage(session);
+    const searchPolicy = resolveSearchPolicy(this.config);
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
+    const guardDir = enforceSearch ? "/tmp/tintin-search-guard" : undefined;
+    const guardLines = enforceSearch ? buildSearchGuardBootstrapLines({ guardDir: guardDir! }) : [];
+    const envOverrides = applySearchEnv(this.applyLanguageEnv(envOverridesBase, language), {
+      policy: searchPolicy,
+      hyperbrowserAvailable,
+      enforce: enforceSearch,
+      guardDir,
+    });
     const normalizedEnv = session.agent === "codex" ? this.normalizeChatgptProxyEnv(session.id, envOverrides) : envOverrides;
-    const agentPrompt = buildLocalizedPrompt(prompt, session.language);
+    const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
+    const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let playwrightSetup: RemotePlaywrightSetup | null = null;
     if (this.isBrowserbaseEnabled()) {
       const existing = this.buildExistingBrowserbaseSetup(session.id);
@@ -3148,6 +3190,7 @@ export class CloudManager {
             workspace,
             envOverrides: normalizedEnv,
             playwright: playwrightSetup,
+            extraBootstrapLines: guardLines,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
@@ -3189,7 +3232,14 @@ export class CloudManager {
     let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? run.snapshot_id ?? null;
     let usedSnapshot = false;
-    const agentPrompt = buildLocalizedPrompt(prompt, session.language);
+    const language = this.resolveSessionLanguage(session);
+    const searchPolicy = resolveSearchPolicy(this.config);
+    const hyperbrowserAvailable = isHyperbrowserAvailable(this.config);
+    const enforceSearch = searchPolicy.mode === "hyperbrowser_first" && hyperbrowserAvailable;
+    const guardDir = enforceSearch ? "/tmp/tintin-search-guard" : undefined;
+    const guardLines = enforceSearch ? buildSearchGuardBootstrapLines({ guardDir: guardDir! }) : [];
+    const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
+    const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let workspace: CloudWorkspace;
     const snapshotId = setupSnapshotId;
     if (snapshotId && this.provider.id === "modal") {
@@ -3357,7 +3407,12 @@ export class CloudManager {
         run.identity_id,
         session.agent,
       );
-      const envOverrides = this.applyLanguageEnv(envOverridesBase, this.resolveSessionLanguage(session));
+      const envOverrides = applySearchEnv(this.applyLanguageEnv(envOverridesBase, language), {
+        policy: searchPolicy,
+        hyperbrowserAvailable,
+        enforce: enforceSearch,
+        guardDir,
+      });
       let playwrightSetup: RemotePlaywrightSetup | null = null;
       if (this.isBrowserbaseEnabled()) {
         playwrightSetup = await this.time(
@@ -3399,6 +3454,7 @@ export class CloudManager {
             workspace,
             envOverrides,
             playwright: playwrightSetup,
+            extraBootstrapLines: guardLines,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
