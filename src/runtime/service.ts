@@ -1,7 +1,7 @@
 import type { AppConfig } from "./config.js";
 import type { Db } from "./db.js";
 import type { Logger } from "./log.js";
-import { sleep, TaskQueue } from "./util.js";
+import { sleep, TaskQueue, nowMs } from "./util.js";
 import { TelegramClient } from "./platform/telegram.js";
 import { SlackClient, verifySlackSignature } from "./platform/slack.js";
 import { BotController, type CommitProposal, type CommitProposalStore } from "./controller2.js";
@@ -18,14 +18,14 @@ import {
   shouldHandleGithubWebhookEvent,
   verifyGithubWebhookSignature,
 } from "./cloud/githubWebhook.js";
-import { handleProxyRequest } from "./cloud/proxy.js";
+import { handleProxyRequest, createProxyToken } from "./cloud/proxy.js";
 import { completeChatgptOAuth, isAllowedRedirectHost } from "./chatgpt/oauth.js";
 import { purgeExpiredChatgptStates } from "./chatgpt/store.js";
 import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
 import type { SendToSessionFn } from "./messaging.js";
 import type { TelegramMessage } from "./platform/telegram.js";
-import { getUserLanguage } from "./store.js";
+import { getUserLanguage, createSession, type SessionRow } from "./store.js";
 import { getAgentAdapter } from "./agents.js";
 import {
   addCloudRunScreenshot,
@@ -37,6 +37,22 @@ import {
   getSecret,
   setSecret,
   deleteSecret,
+  getOrCreateIdentity,
+  createCodeRegistryEntry,
+  listCodeRegistryEntries,
+  ignoreCodeRegistryEntry,
+  createSiteRegistryEntry,
+  listSiteRegistryEntries,
+  ignoreSiteRegistryEntry,
+  createStaticDeployEntry,
+  updateStaticDeployEntry,
+  setStaticDeployActive,
+  listStaticDeploys,
+  getStaticDeployByIdx,
+  createDynamicDeployEntry,
+  updateDynamicDeployEntry,
+  listDynamicDeploys,
+  getDynamicDeployByIdx,
 } from "./cloud/store.js";
 import { uploadScreenshot, signScreenshotUrl } from "./cloud/s3.js";
 import { verifyUiToken, type UiTokenPayload } from "./cloud/uiTokens.js";
@@ -44,9 +60,15 @@ import { buildRunArtifactsFromJsonl } from "./cloud/uiArtifacts.js";
 import { encryptSecret } from "./cloud/secrets.js";
 import http from "node:http";
 import { PlaywrightMcpManager } from "./playwrightMcp.js";
-import { appendFile, open, readdir, readFile } from "node:fs/promises";
+import { appendFile, open, readdir, readFile, mkdir, rm, rename, writeFile } from "node:fs/promises";
+import { createWriteStream } from "node:fs";
+import { spawn } from "node:child_process";
+import { pipeline } from "node:stream/promises";
 import path from "node:path";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
+import { WebSocketManager } from "./websocket/manager.js";
+import { WebSocketHandler } from "./websocket/handler.js";
+import type { ServerMessage } from "./websocket/types.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -121,6 +143,153 @@ function sendJson(res: http.ServerResponse, status: number, body: any) {
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
 }
+
+function decodeBase64Url(input: string): Buffer | null {
+  if (!input) return null;
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  try {
+    return Buffer.from(normalized + pad, "base64");
+  } catch {
+    return null;
+  }
+}
+
+function parseAgentMeta(headerValue: string | null): any | null {
+  if (!headerValue) return null;
+  const decoded = decodeBase64Url(headerValue);
+  if (!decoded) return null;
+  try {
+    return JSON.parse(decoded.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function writeRequestToFile(req: http.IncomingMessage, targetPath: string, maxBytes: number): Promise<number> {
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  const out = createWriteStream(targetPath);
+  let total = 0;
+  return await new Promise<number>((resolve, reject) => {
+    req.on("data", (chunk: Buffer | string) => {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      total += buf.length;
+      if (total > maxBytes) {
+        req.destroy();
+        out.destroy();
+        reject(new Error("payload too large"));
+      }
+    });
+    out.on("error", reject);
+    out.on("finish", () => resolve(total));
+    pipeline(req, out).catch(reject);
+  });
+}
+
+async function runCommand(cmd: string, args: string[], opts: { cwd?: string } = {}): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return await new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => (stdout += chunk.toString()));
+    child.stderr?.on("data", (chunk) => (stderr += chunk.toString()));
+    child.on("close", (code) => resolve({ stdout, stderr, exitCode: code ?? 0 }));
+    child.on("error", (err) => resolve({ stdout, stderr: String(err), exitCode: 1 }));
+  });
+}
+
+function isSafeTarEntry(entry: string): boolean {
+  if (!entry) return true;
+  if (entry.startsWith("/") || entry.startsWith("\\")) return false;
+  const parts = entry.split("/").filter(Boolean);
+  return !parts.some((part) => part === "..");
+}
+
+async function safeExtractTar(archivePath: string, destDir: string): Promise<void> {
+  const list = await runCommand("tar", ["-tvzf", archivePath]);
+  if (list.exitCode !== 0) throw new Error(`tar list failed: ${list.stderr || list.stdout}`);
+  const lines = list.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const parts = line.split(/\s+/);
+    if (parts.length < 6) continue;
+    const typeChar = parts[0]?.[0] ?? "";
+    if (typeChar === "l" || typeChar === "h") {
+      throw new Error(`unsafe tar entry type: ${line}`);
+    }
+    const namePart = parts.slice(5).join(" ");
+    const arrowIdx = namePart.indexOf(" -> ");
+    const linkIdx = namePart.indexOf(" link to ");
+    const cutIdx = arrowIdx >= 0 ? arrowIdx : linkIdx >= 0 ? linkIdx : namePart.length;
+    const entry = namePart.slice(0, cutIdx).replace(/^\.\/+/, "");
+    if (!isSafeTarEntry(entry)) throw new Error(`unsafe tar entry: ${entry}`);
+  }
+  await mkdir(destDir, { recursive: true });
+  const extract = await runCommand("tar", ["-xzf", archivePath, "-C", destDir, "--no-same-owner", "--no-same-permissions"]);
+  if (extract.exitCode !== 0) throw new Error(`tar extract failed: ${extract.stderr || extract.stdout}`);
+}
+
+function normalizeSetupList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  return [];
+}
+
+function normalizeIgnoreList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((v) => String(v)).filter(Boolean);
+  return [];
+}
+
+function inferPortFromStartup(startup: string): number {
+  const portFromEnv = startup.match(/\bPORT\s*=\s*(\d{2,5})\b/);
+  if (portFromEnv) return Number(portFromEnv[1]);
+  const portFlag = startup.match(/--port(?:=|\s+)(\d{2,5})/);
+  if (portFlag) return Number(portFlag[1]);
+  const shortFlag = startup.match(/\s-p\s+(\d{2,5})/);
+  if (shortFlag) return Number(shortFlag[1]);
+  return 3000;
+}
+
+function buildNginxServerBlock(host: string, rootPath: string): string {
+  return [
+    "server {",
+    "  listen 80;",
+    `  server_name ${host};`,
+    `  root ${rootPath};`,
+    "  index index.html;",
+    "  location / {",
+    "    try_files $uri $uri/ /index.html;",
+    "  }",
+    "}",
+    "",
+  ].join("\n");
+}
+
+function buildLocalSiteUrl(port: number, sitePath: string): string {
+  const trimmed = sitePath.trim();
+  const suffix = trimmed.length > 0 ? (trimmed.startsWith("/") ? trimmed : `/${trimmed}`) : "";
+  return `http://127.0.0.1:${port}${suffix}`;
+}
+
+async function resolveModalTunnelUrl(sandbox: any, port: number): Promise<string> {
+  if (!sandbox) return "";
+  const maxAttempts = 20;
+  const delayMs = 2000;
+  for (let i = 0; i < maxAttempts; i += 1) {
+    try {
+      const tunnels = (await sandbox.tunnels(5_000)) as Record<string | number, { url?: string } | undefined>;
+      const tunnel = tunnels[port];
+      if (tunnel?.url) return tunnel.url;
+    } catch {
+      // ignore
+    }
+    await sleep(delayMs);
+  }
+  return "";
+}
+
+const STATIC_SITE_ROOT = "/mnt/data/sites";
+const NGINX_CONF_DIR = "/etc/nginx/conf.d";
+const DYNAMIC_DEPLOY_ROOT = "/mnt/data/deploys/dynamic";
+const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 
 function sendSse(res: http.ServerResponse, data: unknown, event?: string) {
   if (event) res.write(`event: ${event}\n`);
@@ -315,9 +484,14 @@ export async function createBotService(deps: BotServiceDeps) {
   const suppressFinalizeForSession = new Set<string>();
   const commitProposals = new Map<string, CommitProposal>();
 
-  const telegram = config.telegram ? new TelegramClient(config.telegram, logger) : null;
-  const slack = config.slack ? new SlackClient(config.slack, logger) : null;
+  const telegram = config.telegram?.enabled ? new TelegramClient(config.telegram, logger) : null;
+  const slack = config.slack?.enabled ? new SlackClient(config.slack, logger) : null;
   const playwrightMcp = config.playwright_mcp?.enabled ? new PlaywrightMcpManager(config.playwright_mcp, logger) : null;
+
+  // WebSocket manager - initialized here so it's accessible in sendToSession closure
+  // The actual setup happens after sessionManager is created
+  let wsManager: WebSocketManager | null = null;
+
   if (config.chatgpt_oauth) {
     const sweep = async () => {
       try {
@@ -424,6 +598,46 @@ export async function createBotService(deps: BotServiceDeps) {
       });
     } catch (e) {
       logger.warn(`Failed to send GitHub connect message: ${String(e)}`);
+    }
+  };
+
+  /**
+   * Notify WebSocket client about OAuth completion
+   */
+  const notifyWebSocketOAuthComplete = async (
+    metadataJson: string | null,
+    provider: string,
+    identityId: string,
+  ): Promise<void> => {
+    if (!metadataJson || !wsManager) return;
+    try {
+      const wsMetadata = JSON.parse(metadataJson);
+      if (!wsMetadata.connection_id) return;
+
+      // Get account login for GitHub providers
+      let accountLogin: string | undefined;
+      if (provider === "github") {
+        // For GitHub, account_login is stored in github_installations via the connection's installation_id
+        const connection = await db
+          .selectFrom("connections")
+          .innerJoin("github_installations", "connections.installation_id", "github_installations.installation_id")
+          .select(["github_installations.account_login"])
+          .where("connections.identity_id", "=", identityId)
+          .where("connections.type", "like", "github%")
+          .orderBy("connections.created_at", "desc")
+          .executeTakeFirst();
+        accountLogin = connection?.account_login ?? undefined;
+      }
+
+      wsManager.sendToConnection(wsMetadata.connection_id, {
+        type: 'auth_status',
+        provider,
+        connected: true,
+        accountLogin,
+      });
+      logger.info(`Sent auth_status to WebSocket connection ${wsMetadata.connection_id}`);
+    } catch {
+      // Ignore parse errors
     }
   };
 
@@ -1117,6 +1331,45 @@ export async function createBotService(deps: BotServiceDeps) {
     const session = await db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
     if (!session) return;
     const lang = resolveSessionLanguage(session);
+
+    // WebSocket push: broadcast to all subscribers of this session
+    if (wsManager?.hasSubscribers(sessionId)) {
+      let wsMessage: ServerMessage | null = null;
+      if (message.type === "finalize") {
+        wsMessage = { type: 'done', sessionId };
+      } else if (message.type === "plan_update") {
+        wsMessage = {
+          type: 'plan_update',
+          sessionId,
+          plan: message.plan.map(p => ({ step: p.step, status: p.status as any })),
+          explanation: message.explanation,
+        };
+      } else if (message.type === "image") {
+        // For images, we send a tool_output with the path (can't send binary over text WS)
+        wsMessage = {
+          type: 'tool_output',
+          sessionId,
+          name: 'screenshot',
+          output: message.caption ?? message.filename,
+        };
+      } else if (typeof message.text === "string") {
+        wsMessage = { type: 'chunk', sessionId, content: message.text };
+        if (message.final) {
+          // Send chunk first, then done
+          wsManager.broadcastToSession(sessionId, wsMessage);
+          wsMessage = { type: 'done', sessionId };
+        }
+      }
+      if (wsMessage) {
+        wsManager.broadcastToSession(sessionId, wsMessage);
+      }
+    }
+
+    // Skip platform delivery for WebSocket-only sessions
+    if (session.platform === "websocket") {
+      return;
+    }
+
     const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
     const handledCommitProposal = await maybeHandleCommitProposalMessage(sessionId, message);
     if (handledCommitProposal) return;
@@ -1346,6 +1599,16 @@ export async function createBotService(deps: BotServiceDeps) {
       : null,
   );
 
+  // WebSocket manager initialization
+  let wsHandler: WebSocketHandler | null = null;
+  if (config.websocket?.enabled) {
+    wsManager = new WebSocketManager(config.websocket, logger);
+    wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
+    wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
+    wsManager.startHeartbeat();
+    logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);
+  }
+
   const extractUiToken = (req: http.IncomingMessage, url: URL): string | null => {
     const header = readHeader(req, "authorization");
     if (header && header.startsWith("Bearer ")) return header.slice("Bearer ".length).trim();
@@ -1412,6 +1675,51 @@ export async function createBotService(deps: BotServiceDeps) {
     });
   };
 
+  const resolveAgentContext = async (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    opts?: { sessionId?: string },
+  ): Promise<{ sessionId: string; identityId: string } | null> => {
+    if (!cloudManager || !config.cloud?.enabled) {
+      sendText(res, 404, "cloud not enabled");
+      return null;
+    }
+    const sessionId =
+      opts?.sessionId ??
+      readHeader(req, "x-tintin-session") ??
+      readHeader(req, "x-tintin-agent-session") ??
+      "";
+    if (!sessionId) {
+      sendText(res, 400, "missing session id");
+      return null;
+    }
+    const authHeader = readHeader(req, "authorization");
+    const tokenHeader = readHeader(req, "x-tintin-agent-token");
+    const token =
+      authHeader && authHeader.toLowerCase().startsWith("bearer ")
+        ? authHeader.slice("bearer ".length).trim()
+        : tokenHeader ?? "";
+    if (!token || !cloudManager.verifyAgentToken(sessionId, token)) {
+      sendText(res, 403, "forbidden");
+      return null;
+    }
+    const sessionRow = await db
+      .selectFrom("sessions")
+      .select(["platform", "workspace_id", "created_by_user_id"])
+      .where("id", "=", sessionId)
+      .executeTakeFirst();
+    if (!sessionRow) {
+      sendText(res, 404, "session not found");
+      return null;
+    }
+    const identity = await getOrCreateIdentity(db, {
+      platform: sessionRow.platform as "telegram" | "slack",
+      workspaceId: sessionRow.workspace_id || null,
+      userId: sessionRow.created_by_user_id,
+    });
+    return { sessionId, identityId: identity.id };
+  };
+
   if (telegram && config.telegram?.mode === "poll") {
     logger.info(
       `Telegram polling enabled (timeout=${config.telegram.poll_timeout_seconds}s rate=${config.telegram.rate_limit_msgs_per_sec} msg/s)`,
@@ -1454,43 +1762,739 @@ export async function createBotService(deps: BotServiceDeps) {
         return;
       }
 
+      // OPTIONS /api/ws/token - CORS preflight
+      if (req.method === "OPTIONS" && pathname === "/api/ws/token") {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+
+      // GET /api/ws/token - Generate WebSocket authentication token
+      if (req.method === "GET" && pathname === "/api/ws/token") {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        const proxy = config.cloud?.proxy;
+        if (!proxy?.shared_secret) {
+          sendJson(res, 500, { error: "WebSocket token auth not configured" });
+          return;
+        }
+
+        // Generate anonymous token for web clients
+        // In production, this should validate user identity first
+        const identityId = `ws:web:${crypto.randomUUID().slice(0, 8)}`;
+        const ttlMs = proxy.token_ttl_ms ?? 3600000; // Default 1 hour
+        const token = createProxyToken(proxy.shared_secret, identityId, ttlMs);
+
+        sendJson(res, 200, { token, identityId, expiresIn: ttlMs });
+        return;
+      }
+
       const pathParts = pathname.split("/").filter(Boolean);
       if (pathParts[0] === "api" && pathParts[1] === "cloud" && pathParts[2] === "agent") {
-        if (req.method !== "POST" || pathParts[3] !== "logs") {
-          sendText(res, 404, "not found");
+        if (pathParts[3] === "e2e-token") {
+          if (req.method !== "POST") {
+            sendText(res, 404, "not found");
+            return;
+          }
+          if (process.env.TINTIN_E2E !== "1") {
+            sendText(res, 404, "not found");
+            return;
+          }
+          const raw = await readRequestBody(req);
+          let body: any = {};
+          if (raw && raw.trim().length > 0) {
+            try {
+              body = JSON.parse(raw);
+            } catch {
+              sendText(res, 400, "invalid json");
+              return;
+            }
+          }
+          if (!cloudManager || !config.cloud?.enabled) {
+            sendText(res, 404, "cloud not enabled");
+            return;
+          }
+          const now = nowMs();
+          const sessionId = crypto.randomUUID();
+          const platform = typeof body.platform === "string" ? body.platform : "slack";
+          const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "e2e";
+          const userId = typeof body.user_id === "string" ? body.user_id : "e2e-user";
+          const projectPath = typeof body.project_path === "string" ? body.project_path : process.cwd();
+          const sessionRow: SessionRow = {
+            id: sessionId,
+            agent: "codex",
+            platform,
+            workspace_id: workspaceId,
+            chat_id: `e2e-${sessionId.slice(0, 8)}`,
+            space_id: workspaceId,
+            space_emoji: null,
+            created_by_user_id: userId,
+            project_id: "e2e-project",
+            project_path_resolved: projectPath,
+            codex_session_id: null,
+            browserbase_session_id: null,
+            hyperbrowser_session_id: null,
+            codex_cwd: projectPath,
+            status: "running",
+            pid: null,
+            exit_code: null,
+            started_at: now,
+            finished_at: null,
+            created_at: now,
+            updated_at: now,
+            last_user_message_at: now,
+            language: "en",
+          };
+          await createSession(db, sessionRow);
+          const token = cloudManager.issueAgentTokenForSession(sessionId);
+          sendJson(res, 200, { sessionId, token });
           return;
         }
-        if (!cloudManager || !config.cloud?.enabled) {
-          sendText(res, 404, "cloud not enabled");
+        if (pathParts[3] === "logs") {
+          if (req.method !== "POST") {
+            sendText(res, 404, "not found");
+            return;
+          }
+          const sessionId = pathParts[4] ?? "";
+          const ctx = await resolveAgentContext(req, res, { sessionId });
+          if (!ctx) return;
+          const payload = await readRequestBody(req);
+          if (!payload) {
+            sendText(res, 204, "ok");
+            return;
+          }
+          const logPath = await cloudManager!.getOrCreateAgentLogPath(ctx.sessionId);
+          if (!logPath) {
+            sendText(res, 500, "log path unavailable");
+            return;
+          }
+          await appendFile(logPath, payload);
+          sendText(res, 200, "ok");
           return;
         }
-        const sessionId = pathParts[4] ?? "";
-        if (!sessionId) {
-          sendText(res, 400, "missing session id");
-          return;
+
+        const ctx = await resolveAgentContext(req, res);
+        if (!ctx) return;
+
+        const command = pathParts[3] ?? "";
+        const subcommand = pathParts[4] ?? "";
+
+        const emitAgentEvent = (payload: {
+          command: string;
+          subcommand: string;
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          };
+          response: {
+            status: number;
+            body?: unknown;
+            text?: string;
+            error?: string;
+          };
+        }) => {
+          if (!wsManager) return;
+          wsManager.broadcastToSession(ctx.sessionId, {
+            type: "agent_event",
+            sessionId: ctx.sessionId,
+            command: payload.command,
+            subcommand: payload.subcommand,
+            request: payload.request,
+            response: payload.response,
+          });
+        };
+
+        const sendAgentJson = (
+          status: number,
+          body: unknown,
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          },
+        ) => {
+          sendJson(res, status, body);
+          emitAgentEvent({
+            command,
+            subcommand,
+            request,
+            response: { status, body },
+          });
+        };
+
+        const sendAgentText = (
+          status: number,
+          text: string,
+          request: {
+            method: string;
+            path: string;
+            query?: Record<string, string>;
+            body?: unknown;
+            meta?: unknown;
+            upload_bytes?: number;
+          },
+        ) => {
+          sendText(res, status, text);
+          emitAgentEvent({
+            command,
+            subcommand,
+            request,
+            response: status >= 400 ? { status, error: text } : { status, text },
+          });
+        };
+
+        if (command === "code") {
+          if (req.method === "POST" && subcommand === "add") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const directory = typeof body.directory === "string" ? body.directory.trim() : "";
+            const summary = typeof body.summary === "string" ? body.summary.trim() : "";
+            if (!directory || !summary) {
+              sendAgentText(400, "missing directory or summary", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const entry = await createCodeRegistryEntry(db, { identityId: ctx.identityId, directory, summary });
+            sendAgentJson(
+              200,
+              { idx: entry.idx, directory: entry.directory, summary: entry.summary },
+              { method: req.method ?? "", path: pathname, body },
+            );
+            return;
+          }
+          if (req.method === "GET" && subcommand === "list") {
+            const entries = await listCodeRegistryEntries(db, ctx.identityId);
+            sendAgentJson(
+              200,
+              { items: entries.map((row) => ({ idx: row.idx, directory: row.directory, summary: row.summary })) },
+              { method: req.method ?? "", path: pathname },
+            );
+            return;
+          }
+          if (req.method === "POST" && subcommand === "ignore") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const target = typeof body.target === "string" ? body.target.trim() : "";
+            if (!target) {
+              sendAgentText(400, "missing target", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const deleted = await ignoreCodeRegistryEntry(db, { identityId: ctx.identityId, target });
+            sendAgentJson(200, { deleted }, { method: req.method ?? "", path: pathname, body });
+            return;
+          }
         }
-        const authHeader = readHeader(req, "authorization");
-        const tokenHeader = readHeader(req, "x-tintin-agent-token");
-        const token =
-          authHeader && authHeader.toLowerCase().startsWith("bearer ")
-            ? authHeader.slice("bearer ".length).trim()
-            : tokenHeader ?? "";
-        if (!token || !cloudManager.verifyAgentToken(sessionId, token)) {
-          sendText(res, 403, "forbidden");
-          return;
+
+        if (command === "site") {
+          if (req.method === "POST" && subcommand === "add") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const port = Number(body.port);
+            const summary = typeof body.summary === "string" ? body.summary.trim() : "";
+            const sitePath = typeof body.path === "string" ? body.path.trim() : "";
+            if (!Number.isFinite(port) || port <= 0) {
+              sendAgentText(400, "invalid port", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            if (!summary) {
+              sendAgentText(400, "missing summary", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
+            sendAgentJson(
+              200,
+              {
+                idx: entry.idx,
+                port: entry.port,
+                path: entry.path,
+                summary: entry.summary,
+                url: buildLocalSiteUrl(entry.port, entry.path),
+              },
+              { method: req.method ?? "", path: pathname, body },
+            );
+            return;
+          }
+          if (req.method === "GET" && subcommand === "list") {
+            const entries = await listSiteRegistryEntries(db, ctx.identityId);
+            sendAgentJson(
+              200,
+              {
+                items: entries.map((row) => ({
+                  idx: row.idx,
+                  port: row.port,
+                  path: row.path,
+                  summary: row.summary,
+                  url: buildLocalSiteUrl(row.port, row.path),
+                })),
+              },
+              { method: req.method ?? "", path: pathname },
+            );
+            return;
+          }
+          if (req.method === "POST" && subcommand === "ignore") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const idx = Number(body.idx);
+            if (!Number.isFinite(idx)) {
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const deleted = await ignoreSiteRegistryEntry(db, { identityId: ctx.identityId, idx });
+            sendAgentJson(200, { deleted }, { method: req.method ?? "", path: pathname, body });
+            return;
+          }
         }
-        const payload = await readRequestBody(req);
-        if (!payload) {
-          sendText(res, 204, "ok");
-          return;
+
+        if (command === "static-deploy") {
+          if (req.method === "GET" && subcommand === "list") {
+            const entries = await listStaticDeploys(db, ctx.identityId);
+            sendAgentJson(
+              200,
+              {
+                items: entries.map((row) => ({
+                  idx: row.idx,
+                  time: row.created_at,
+                  summary: row.summary,
+                  app_name: row.app_name,
+                  url: `http://${row.stable_host}`,
+                })),
+              },
+              { method: req.method ?? "", path: pathname },
+            );
+            return;
+          }
+          if (req.method === "POST" && subcommand === "rollback") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const idx = Number(body.idx);
+            if (!Number.isFinite(idx)) {
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const entry = await getStaticDeployByIdx(db, ctx.identityId, idx);
+            if (!entry) {
+              sendAgentText(404, "deploy not found", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const stableHost = entry.stable_host;
+            const stableConfPath = path.join(NGINX_CONF_DIR, `site-${entry.session_id}.conf`);
+            await writeFile(stableConfPath, buildNginxServerBlock(stableHost, entry.root_path), "utf8");
+            const reload = await runCommand("nginx", ["-s", "reload"]);
+            if (reload.exitCode !== 0) {
+              sendAgentText(500, `nginx reload failed: ${reload.stderr || reload.stdout}`, {
+                method: req.method ?? "",
+                path: pathname,
+                body,
+              });
+              return;
+            }
+            await setStaticDeployActive(db, { identityId: ctx.identityId, sessionId: entry.session_id, idx: entry.idx });
+            sendAgentJson(
+              200,
+              { status: "rolled_back", idx: entry.idx, url: `http://${stableHost}` },
+              { method: req.method ?? "", path: pathname, body },
+            );
+            return;
+          }
+          if (req.method === "POST" && subcommand === "new") {
+            const meta = parseAgentMeta(readHeader(req, "x-tintin-meta"));
+            const summary = typeof meta?.summary === "string" ? meta.summary.trim() : "";
+            const appName = typeof meta?.app_name === "string" ? meta.app_name.trim() : "";
+            if (!summary || !appName) {
+              sendAgentText(400, "missing summary or app_name", { method: req.method ?? "", path: pathname, meta });
+              return;
+            }
+            const requestInfo: {
+              method: string;
+              path: string;
+              meta?: unknown;
+              upload_bytes?: number;
+            } = { method: req.method ?? "", path: pathname, meta };
+            const tmpArchive = path.join(DYNAMIC_DEPLOY_ROOT, "tmp", `static-${ctx.sessionId}-${Date.now()}.tar.gz`);
+            try {
+              const uploadBytes = await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              requestInfo.upload_bytes = uploadBytes;
+              const entry = await createStaticDeployEntry(db, {
+                identityId: ctx.identityId,
+                sessionId: ctx.sessionId,
+                appName,
+                summary,
+                rootPath: "",
+                versionHost: "",
+                stableHost: `${ctx.sessionId}.site.ctf.so`,
+              });
+              const rootPath = path.join(STATIC_SITE_ROOT, ctx.sessionId, String(entry.idx));
+              const versionHost = `${ctx.sessionId}-${entry.idx}.site.ctf.so`;
+              const stableHost = `${ctx.sessionId}.site.ctf.so`;
+              const versionConfPath = path.join(NGINX_CONF_DIR, `site-${ctx.sessionId}-${entry.idx}.conf`);
+              const stableConfPath = path.join(NGINX_CONF_DIR, `site-${ctx.sessionId}.conf`);
+              let prevStableConf: string | null = null;
+              try {
+                prevStableConf = await readFile(stableConfPath, "utf8");
+              } catch {
+                prevStableConf = null;
+              }
+              try {
+                await safeExtractTar(tmpArchive, rootPath);
+                await writeFile(versionConfPath, buildNginxServerBlock(versionHost, rootPath), "utf8");
+                await writeFile(stableConfPath, buildNginxServerBlock(stableHost, rootPath), "utf8");
+                const reload = await runCommand("nginx", ["-s", "reload"]);
+                if (reload.exitCode !== 0) {
+                  throw new Error(`nginx reload failed: ${reload.stderr || reload.stdout}`);
+                }
+                await updateStaticDeployEntry(db, {
+                  identityId: ctx.identityId,
+                  idx: entry.idx,
+                  patch: { root_path: rootPath, version_host: versionHost, stable_host: stableHost, is_active: 1 },
+                });
+                await setStaticDeployActive(db, { identityId: ctx.identityId, sessionId: ctx.sessionId, idx: entry.idx });
+                sendAgentJson(
+                  200,
+                  { idx: entry.idx, url: `http://${stableHost}` },
+                  requestInfo,
+                );
+                return;
+              } catch (err) {
+                if (prevStableConf !== null) {
+                  await writeFile(stableConfPath, prevStableConf, "utf8").catch(() => {});
+                } else {
+                  await rm(stableConfPath, { force: true }).catch(() => {});
+                }
+                await rm(versionConfPath, { force: true }).catch(() => {});
+                await rm(rootPath, { recursive: true, force: true }).catch(() => {});
+                await db
+                  .deleteFrom("static_deploys")
+                  .where("identity_id", "=", ctx.identityId)
+                  .where("idx", "=", entry.idx)
+                  .execute()
+                  .catch(() => {});
+                await runCommand("nginx", ["-s", "reload"]).catch(() => {});
+                sendAgentText(500, `static deploy failed: ${String(err)}`, requestInfo);
+                return;
+              }
+            } finally {
+              await rm(tmpArchive, { force: true }).catch(() => {});
+            }
+          }
         }
-        const logPath = await cloudManager.getOrCreateAgentLogPath(sessionId);
-        if (!logPath) {
-          sendText(res, 500, "log path unavailable");
-          return;
+
+        if (command === "dynamic-deploy") {
+          if (req.method === "GET" && subcommand === "list") {
+            const entries = await listDynamicDeploys(db, ctx.identityId);
+            sendAgentJson(
+              200,
+              {
+                items: entries.map((row) => ({
+                  idx: row.idx,
+                  time: row.created_at,
+                  summary: row.summary,
+                  app_name: row.app_name,
+                })),
+              },
+              { method: req.method ?? "", path: pathname },
+            );
+            return;
+          }
+          if (req.method === "GET" && subcommand === "log") {
+            const idxRaw = url.searchParams.get("idx") ?? "";
+            const idx = Number(idxRaw);
+            if (!Number.isFinite(idx)) {
+              sendAgentText(400, "invalid idx", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
+              return;
+            }
+            const entry = await getDynamicDeployByIdx(db, ctx.identityId, idx);
+            if (!entry) {
+              sendAgentText(404, "deploy not found", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
+              return;
+            }
+            if (!cloudManager || cloudManager.getProviderId() !== "modal") {
+              sendAgentText(503, "modal provider required", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
+              return;
+            }
+            const modal = cloudManager.getModalProviderForDeploy();
+            const sandbox = await modal.getSandboxHandle(entry.workspace_id);
+            if (!sandbox) {
+              sendAgentText(404, "sandbox not found", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
+              return;
+            }
+            const logCmd = `tail -n 400 ${JSON.stringify(entry.log_path)}`;
+            const proc = await sandbox.exec(["/bin/sh", "-lc", logCmd], { workdir: "/", timeoutMs: 10_000, mode: "text" });
+            const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
+            if (exitCode !== 0) {
+              sendAgentText(500, stderr || stdout || "log unavailable", {
+                method: req.method ?? "",
+                path: pathname,
+                query: { idx: idxRaw },
+              });
+              return;
+            }
+            sendAgentText(200, stdout || "", {
+              method: req.method ?? "",
+              path: pathname,
+              query: { idx: idxRaw },
+            });
+            return;
+          }
+          if (req.method === "POST" && subcommand === "rollback") {
+            const raw = await readRequestBody(req);
+            let body: any = {};
+            if (raw && raw.trim().length > 0) {
+              try {
+                body = JSON.parse(raw);
+              } catch {
+                sendAgentText(400, "invalid json", { method: req.method ?? "", path: pathname, body: raw });
+                return;
+              }
+            }
+            const idx = Number(body.idx);
+            if (!Number.isFinite(idx)) {
+              sendAgentText(400, "invalid idx", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const entry = await getDynamicDeployByIdx(db, ctx.identityId, idx);
+            if (!entry) {
+              sendAgentText(404, "deploy not found", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            if (!cloudManager || cloudManager.getProviderId() !== "modal") {
+              sendAgentText(503, "modal provider required", { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const modal = cloudManager.getModalProviderForDeploy();
+            const startup = entry.startup;
+            const port = entry.port;
+            let setupList: string[] = [];
+            try {
+              setupList = normalizeSetupList(JSON.parse(entry.setup_json || "[]"));
+            } catch {
+              setupList = [];
+            }
+            const archivePath = entry.archive_path;
+            const imageRef = entry.image_ref;
+            const useSnapshot = Boolean(entry.snapshot_id);
+            let workspace = null as any;
+            let usedSnapshot = false;
+            if (useSnapshot && entry.snapshot_id) {
+              try {
+                workspace = await modal.createWorkspaceFromSnapshot(entry.snapshot_id, { encryptedPorts: [port] });
+                usedSnapshot = true;
+              } catch (e) {
+                logger.warn(`[deploy][dynamic] snapshot restore failed idx=${entry.idx}: ${String(e)}`);
+              }
+            }
+            if (!workspace) {
+              const imageTag = imageRef && !imageRef.startsWith("modal://") ? imageRef : "";
+              const imageId = imageRef && imageRef.startsWith("modal://") ? imageRef.slice("modal://".length) : "";
+              workspace = await modal.createWorkspaceFromImageRef({
+                imageId,
+                imageTag,
+                label: imageRef || "deploy",
+                encryptedPorts: [port],
+              });
+            }
+            const appDir = path.posix.join(workspace.rootPath, "app");
+            const logPath = path.posix.join(workspace.rootPath, ".deploy", "startup.log");
+            const commands: string[] = [`mkdir -p ${JSON.stringify(appDir)}`];
+            if (!usedSnapshot) {
+              await modal.uploadFileFromPath(workspace, archivePath, ".deploy/archive.tar.gz");
+              const archiveRemote = path.posix.join(workspace.rootPath, ".deploy", "archive.tar.gz");
+              commands.push(
+                `tar -xzf ${JSON.stringify(archiveRemote)} -C ${JSON.stringify(appDir)}`,
+                `rm -f ${JSON.stringify(archiveRemote)}`,
+                ...setupList,
+              );
+            }
+            commands.push(
+              `cd ${JSON.stringify(appDir)} && nohup /bin/sh -lc ${JSON.stringify(startup)} > ${JSON.stringify(logPath)} 2>&1 &`,
+            );
+            try {
+              await modal.runCommands({ workspace, cwd: "/", commands });
+            } catch (e) {
+              sendAgentText(500, `deploy rollback failed: ${String(e)}`, { method: req.method ?? "", path: pathname, body });
+              return;
+            }
+            const sandbox = await modal.getSandboxHandle(workspace.id);
+            const urlResult = await resolveModalTunnelUrl(sandbox, port);
+            await updateDynamicDeployEntry(db, {
+              identityId: ctx.identityId,
+              idx: entry.idx,
+              patch: { workspace_id: workspace.id, url: urlResult, status: "running", log_path: logPath },
+            });
+            sendAgentJson(
+              200,
+              { status: "rolled_back", idx: entry.idx, url: urlResult },
+              { method: req.method ?? "", path: pathname, body },
+            );
+            return;
+          }
+          if (req.method === "POST" && subcommand.startsWith("new")) {
+            const meta = parseAgentMeta(readHeader(req, "x-tintin-meta"));
+            const summary = typeof meta?.summary === "string" ? meta.summary.trim() : "";
+            const appName = typeof meta?.app_name === "string" ? meta.app_name.trim() : "";
+            const startup = typeof meta?.startup === "string" ? meta.startup.trim() : "";
+            const setupList = normalizeSetupList(meta?.setup);
+            const ignoreList = normalizeIgnoreList(meta?.ignore);
+            const metaPort = Number(meta?.port);
+            const overridePort = Number.isFinite(metaPort) ? metaPort : null;
+            if (!summary || !appName || !startup) {
+              sendAgentText(400, "missing summary, app_name, or startup", { method: req.method ?? "", path: pathname, meta });
+              return;
+            }
+            if (!cloudManager || cloudManager.getProviderId() !== "modal") {
+              sendAgentText(503, "modal provider required", { method: req.method ?? "", path: pathname, meta });
+              return;
+            }
+            const requestInfo: {
+              method: string;
+              path: string;
+              meta?: unknown;
+              upload_bytes?: number;
+            } = { method: req.method ?? "", path: pathname, meta };
+            const tmpArchive = path.join(DYNAMIC_DEPLOY_ROOT, "tmp", `dynamic-${ctx.sessionId}-${Date.now()}.tar.gz`);
+            try {
+              const uploadBytes = await writeRequestToFile(req, tmpArchive, MAX_UPLOAD_BYTES);
+              requestInfo.upload_bytes = uploadBytes;
+              const modalCfg = config.cloud?.modal;
+              const imageForKind = () => {
+                if (!modalCfg) return { imageTag: "", imageId: "" };
+                if (subcommand === "new-next" && modalCfg.image_next) return { imageTag: modalCfg.image_next, imageId: "" };
+                if (subcommand === "new-express" && modalCfg.image_express) return { imageTag: modalCfg.image_express, imageId: "" };
+                if (subcommand === "new-flask" && modalCfg.image_flask) return { imageTag: modalCfg.image_flask, imageId: "" };
+                if (modalCfg.image_id) return { imageTag: "", imageId: modalCfg.image_id };
+                return { imageTag: modalCfg.image, imageId: "" };
+              };
+              const { imageTag, imageId } = imageForKind();
+              const imageRef = imageId ? `modal://${imageId}` : imageTag;
+              const port = overridePort ?? inferPortFromStartup(startup);
+              const modal = cloudManager.getModalProviderForDeploy();
+              const workspace = await modal.createWorkspaceFromImageRef({
+                imageId,
+                imageTag,
+                label: imageRef || "deploy",
+                encryptedPorts: [port],
+              });
+              await modal.uploadFileFromPath(workspace, tmpArchive, ".deploy/archive.tar.gz");
+              const appDir = path.posix.join(workspace.rootPath, "app");
+              const archiveRemote = path.posix.join(workspace.rootPath, ".deploy", "archive.tar.gz");
+              const logPath = path.posix.join(workspace.rootPath, ".deploy", "startup.log");
+              const commands: string[] = [
+                `mkdir -p ${JSON.stringify(appDir)}`,
+                `tar -xzf ${JSON.stringify(archiveRemote)} -C ${JSON.stringify(appDir)}`,
+                `rm -f ${JSON.stringify(archiveRemote)}`,
+                ...setupList,
+                `cd ${JSON.stringify(appDir)} && nohup /bin/sh -lc ${JSON.stringify(startup)} > ${JSON.stringify(logPath)} 2>&1 &`,
+              ];
+              await modal.runCommands({ workspace, cwd: "/", commands });
+              const sandbox = await modal.getSandboxHandle(workspace.id);
+              const urlResult = await resolveModalTunnelUrl(sandbox, port);
+              const entry = await createDynamicDeployEntry(db, {
+                identityId: ctx.identityId,
+                sessionId: ctx.sessionId,
+                appName,
+                summary,
+                provider: "modal",
+                imageRef,
+                workspaceId: workspace.id,
+                port,
+                startup,
+                setupJson: JSON.stringify(setupList),
+                ignoreJson: JSON.stringify(ignoreList),
+                archivePath: tmpArchive,
+                logPath,
+              });
+              const archiveDir = path.join(DYNAMIC_DEPLOY_ROOT, "archives", ctx.sessionId);
+              const archivePath = path.join(archiveDir, `${entry.idx}.tar.gz`);
+              await mkdir(archiveDir, { recursive: true });
+              await rename(tmpArchive, archivePath);
+              let snapshotId: string | null = null;
+              try {
+                snapshotId = await modal.snapshotWorkspace(workspace, "deploy");
+              } catch (e) {
+                logger.warn(`[deploy][dynamic] snapshot failed idx=${entry.idx}: ${String(e)}`);
+              }
+              await updateDynamicDeployEntry(db, {
+                identityId: ctx.identityId,
+                idx: entry.idx,
+                patch: {
+                  archive_path: archivePath,
+                  url: urlResult,
+                  status: "running",
+                  snapshot_id: snapshotId,
+                },
+              });
+              sendAgentJson(200, { idx: entry.idx, log: entry.log_path, url: urlResult }, requestInfo);
+              return;
+            } finally {
+              await rm(tmpArchive, { force: true }).catch(() => {});
+            }
+          }
         }
-        await appendFile(logPath, payload);
-        sendText(res, 200, "ok");
+
+        sendText(res, 404, "not found");
         return;
       }
 
@@ -1918,6 +2922,9 @@ export async function createBotService(deps: BotServiceDeps) {
           }
           try {
             const result = await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
+            // WebSocket notification (for web UI)
+            await notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
+            // Telegram/Slack notification (for chat platforms)
             await notifyGithubConnected(result.metadataJson);
             sendText(res, 200, "Connected. Return to the chat.");
           } catch (e) {
@@ -1933,6 +2940,9 @@ export async function createBotService(deps: BotServiceDeps) {
         }
         try {
           const result = await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          // WebSocket notification (for web UI)
+          await notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
+          // Telegram/Slack notification (for chat platforms)
           if (result.provider === "github") {
             await notifyGithubConnected(result.metadataJson);
           }
@@ -2088,6 +3098,19 @@ export async function createBotService(deps: BotServiceDeps) {
       sendText(res, 500, "internal error");
     }
   });
+
+  // WebSocket upgrade handler
+  if (wsManager && config.websocket?.enabled) {
+    server.on('upgrade', (req, socket, head) => {
+      const reqUrl = req.url ?? '';
+      const pathOnly = reqUrl.split('?')[0];
+      if (pathOnly === config.websocket!.path) {
+        wsManager!.handleUpgrade(req, socket, head);
+      } else {
+        socket.destroy();
+      }
+    });
+  }
 
   let chatgptCallbackServer: http.Server | null = null;
 

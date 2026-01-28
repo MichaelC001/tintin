@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createConnection, createServer } from "node:net";
@@ -35,6 +35,7 @@ import {
 import type { SessionRow } from "./store.js";
 import { getChatgptAccountForIdentity, persistChatgptProxyTokens } from "./chatgpt/oauth.js";
 import { getIdentity } from "./cloud/store.js";
+import { createProxyToken } from "./cloud/proxy.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 
 interface RunningProcess {
@@ -47,6 +48,11 @@ interface RunningProcess {
 
 type SessionNoticeKey = Parameters<typeof t>[0];
 type KillReason = string | { key: SessionNoticeKey; params?: Record<string, string | number> };
+
+interface CloudProxyResult {
+  env: Record<string, string>;
+  codexHome?: string;  // If set, the CODEX_HOME path that was configured
+}
 
 export class SessionStartError extends Error {
   constructor(
@@ -101,6 +107,96 @@ export class SessionManager {
     if (!out.LANG) out.LANG = locale;
     if (!out.LC_ALL) out.LC_ALL = locale;
     return out;
+  }
+
+  /**
+   * Apply cloud proxy environment variables for local sessions.
+   * This allows local/WebSocket sessions to use the centralized API key
+   * configured in [cloud.proxy] without needing to set OPENAI_API_KEY in config.
+   *
+   * Creates a separate CODEX_HOME directory with auth.json containing the proxy token.
+   * This is necessary because Codex reads credentials from ~/.codex/auth.json which
+   * takes precedence over environment variables and --config overrides.
+   */
+  private async applyCloudProxyForLocalSession(
+    env: Record<string, string>,
+    identityId: string,
+  ): Promise<CloudProxyResult> {
+    const proxy = this.config.cloud?.proxy;
+    if (!proxy?.enabled || !proxy.openai_api_key || !proxy.shared_secret) {
+      return { env };
+    }
+
+    // Always override with cloud proxy (force cloud proxy mode)
+    // Generate proxy token
+    const token = createProxyToken(proxy.shared_secret, identityId, proxy.token_ttl_ms);
+
+    // Build proxy URL
+    const baseUrl = this.config.cloud?.public_base_url ?? `http://127.0.0.1:${this.config.bot.port}`;
+    const trimmedBase = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+    const proxyUrl = `${trimmedBase}${proxy.openai_path}`;
+
+    // Create a proxy-specific CODEX_HOME directory
+    // This is necessary because Codex reads stored credentials from ~/.codex/auth.json
+    // which takes precedence over OPENAI_API_KEY environment variable
+    const proxyCodexHome = path.join(this.config.bot.data_dir, "codex-proxy-home");
+    try {
+      await mkdir(proxyCodexHome, { recursive: true });
+      // Also create sessions directory to maintain session paths
+      await mkdir(path.join(proxyCodexHome, "sessions"), { recursive: true });
+      // Write auth.json with proxy token
+      const authJson = JSON.stringify({ OPENAI_API_KEY: token }, null, 2);
+      await writeFile(path.join(proxyCodexHome, "auth.json"), authJson, "utf8");
+    } catch (e) {
+      this.logger.warn(`[session] failed to create proxy codex home: ${String(e)}`);
+    }
+
+    this.logger.info(`[session] cloud proxy applied for local session identity=${identityId}`);
+
+    return {
+      env: {
+        ...env,
+        OPENAI_API_KEY: token,
+        OPENAI_BASE_URL: proxyUrl,
+        OPENAI_API_BASE: proxyUrl,
+        CODEX_HOME: proxyCodexHome,
+      },
+      codexHome: proxyCodexHome,
+    };
+  }
+
+  /**
+   * Build CLI args for cloud proxy.
+   * Switches Codex to the built-in "openai" provider and passes API key via CLI config
+   * to override any stored credentials in ~/.codex/.
+   */
+  private buildCloudProxyCliArgs(agent: SessionAgent, envOverrides: Record<string, string>): string[] {
+    const proxy = this.config.cloud?.proxy;
+    if (!proxy?.enabled || !proxy.openai_api_key || !proxy.shared_secret) {
+      return [];
+    }
+
+    // Only codex needs CLI args override (claude code uses env vars properly)
+    if (agent !== "codex") {
+      return [];
+    }
+
+    const apiKey = envOverrides.OPENAI_API_KEY;
+    const baseUrl = envOverrides.OPENAI_BASE_URL;
+
+    if (!apiKey || !baseUrl) {
+      return [];
+    }
+
+    // Pass both model_provider and openai.api_key via CLI config
+    // This is necessary because Codex may have stored credentials (cr_...) in ~/.codex/
+    // that take precedence over OPENAI_API_KEY environment variable.
+    // Using --config openai.api_key=... forces Codex to use our proxy token.
+    return [
+      "--config", "model_provider=openai",
+      "--config", `openai.api_key=${apiKey}`,
+      "--config", `openai.api_base=${baseUrl}`,
+    ];
   }
 
   private async resolveSessionLanguageById(sessionId: string): Promise<UserLanguage> {
@@ -230,8 +326,8 @@ export class SessionManager {
       const adapter = getAgentAdapter(opts.agent);
       adapter.requireConfig(this.config);
 
-      const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
-      const homeDir = adapter.resolveHomeDir(sessionsRoot);
+      let sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
+      let homeDir = adapter.resolveHomeDir(sessionsRoot);
       await adapter.ensureSessionsRootExists(sessionsRoot);
       const envSeed = this.applyLanguageEnv(opts.envOverrides ?? {}, language);
       const guardDir = enforceSearch
@@ -243,12 +339,23 @@ export class SessionManager {
         enforce: enforceSearch,
         guardDir,
       });
-      const envOverrides = await this.maybePrepareChatgptProxy(session, envWithSearch);
+      const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envWithSearch);
+      const cloudProxyResult = await this.applyCloudProxyForLocalSession(envWithChatgpt, opts.userId);
+      const envOverrides = cloudProxyResult.env;
+
+      // If cloud proxy set a custom CODEX_HOME, update sessionsRoot and homeDir to match
+      if (cloudProxyResult.codexHome) {
+        homeDir = cloudProxyResult.codexHome;
+        sessionsRoot = path.join(cloudProxyResult.codexHome, "sessions");
+        await adapter.ensureSessionsRootExists(sessionsRoot);
+      }
 
       this.logger.debug(
         `[session] spawn agent=${opts.agent} kind=exec session=${id} project=${opts.projectId} cwd=${session.codex_cwd} sessionsRoot=${sessionsRoot} home=${homeDir} search_policy=${searchPolicy.mode} search_provider=${hyperbrowserAvailable ? "hyperbrowser" : "none"} search_enforce=${enforceSearch ? "1" : "0"}`,
       );
-      const extraArgs = await this.playwrightCliArgs(opts.agent);
+      const playwrightArgs = await this.playwrightCliArgs(opts.agent);
+      const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent, envOverrides);
+      const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
         config: this.config,
         logger: this.logger,
@@ -256,7 +363,7 @@ export class SessionManager {
         prompt: agentPrompt,
         homeDir,
         extraEnv: envOverrides,
-        extraArgs: extraArgs ?? undefined,
+        extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
       childToKill = spawnedProc.child;
 
@@ -319,8 +426,8 @@ export class SessionManager {
     const adapter = getAgentAdapter(session.agent);
     adapter.requireConfig(this.config);
 
-    const sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
-    const homeDir = adapter.resolveHomeDir(sessionsRoot);
+    let sessionsRoot = adapter.resolveSessionsRoot(session.codex_cwd, this.config);
+    let homeDir = adapter.resolveHomeDir(sessionsRoot);
     await adapter.ensureSessionsRootExists(sessionsRoot);
     const language = this.resolveSessionLanguage(session);
     const searchPolicy = resolveSearchPolicy(this.config);
@@ -337,6 +444,15 @@ export class SessionManager {
       guardDir,
     });
     const envWithChatgpt = await this.maybePrepareChatgptProxy(session, envWithSearch);
+    const cloudProxyResult = await this.applyCloudProxyForLocalSession(envWithChatgpt, session.created_by_user_id);
+    const envWithCloudProxy = cloudProxyResult.env;
+
+    // If cloud proxy set a custom CODEX_HOME, update sessionsRoot and homeDir to match
+    if (cloudProxyResult.codexHome) {
+      homeDir = cloudProxyResult.codexHome;
+      sessionsRoot = path.join(cloudProxyResult.codexHome, "sessions");
+      await adapter.ensureSessionsRootExists(sessionsRoot);
+    }
 
     // Ensure offsets exist.
     const existingOffsets = await listSessionOffsets(this.db, session.id);
@@ -363,6 +479,9 @@ export class SessionManager {
     const searchDirective = buildSearchDirective({ policy: searchPolicy, lang: language, hyperbrowserAvailable });
     const agentPrompt = buildLocalizedPrompt(prompt, language, { searchDirective });
     let spawned;
+    const playwrightArgs = await this.playwrightCliArgs(session.agent);
+    const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent, envWithCloudProxy);
+    const extraArgs = [...(playwrightArgs ?? []), ...cloudProxyArgs];
     try {
       spawned = adapter.spawnResume({
         config: this.config,
@@ -371,8 +490,8 @@ export class SessionManager {
         sessionId: session.codex_session_id,
         prompt: agentPrompt,
         homeDir,
-        extraEnv: envWithChatgpt,
-        extraArgs: (await this.playwrightCliArgs(session.agent)) ?? undefined,
+        extraEnv: envWithCloudProxy,
+        extraArgs: extraArgs.length > 0 ? extraArgs : undefined,
       });
     } catch (e) {
       await this.teardownChatgptProxy(session.id, session.workspace_id, session.platform, session.created_by_user_id);
@@ -852,3 +971,19 @@ function isPidAlive(pid: number): boolean {
     return code === "EPERM";
   }
 }
+
+// Re-export from modular implementation for migration path.
+// Consumers can import from either './sessionManager' or './session/index'.
+export {
+  SessionStateMachine,
+  ProcessLifecycleManager,
+  ChatGptProxyManager,
+  EnvironmentBuilder,
+  VALID_TRANSITIONS,
+  isTerminalStatus,
+  type ProcessContext,
+  type ProcessRegisterOptions,
+  type ChatGptProxyContext,
+  type CloudProxyResult as ModularCloudProxyResult,
+  type KillReason as ModularKillReason,
+} from "./session/index.js";

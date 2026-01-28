@@ -56,6 +56,7 @@ name = "Custom path…"
 path = "*"
 
 [telegram]
+enabled = true                   # Set to false to disable Telegram (default: true)
 token = "<FILL ME TELEGRAM BOT TOKEN>"
 # Optional extra bots used only for sending to reduce rate limiting; first token above is still used for updates/webhooks.
 # additional_bot_tokens = ["env:TELEGRAM_TOKEN_2", "env:TELEGRAM_TOKEN_3"]
@@ -67,6 +68,7 @@ message_queue_interval_ms = 3000
 rate_limit_msgs_per_sec = 1.0
 
 [slack]
+enabled = true                   # Set to false to disable Slack (default: true)
 bot_token = "<FILL ME SLACK BOT TOKEN>"
 signing_secret = "<FILL ME SLACK SINGING TOKEN>"
 events_path = "/slack/events"
@@ -96,6 +98,9 @@ app_name = "tintin-cloud"
 # Image must include Playwright + Codex + Claude Code preinstalled.
 image = "debian:12"
 # image_id = "" # optional override (snapshot image ID)
+# image_next = "" # optional Next.js Modal image tag
+# image_express = "" # optional Express Modal image tag
+# image_flask = "" # optional Flask Modal image tag
 timeout_ms = 86400000
 idle_timeout_ms = 86400000
 request_timeout_ms = 60000
@@ -198,3 +203,18 @@ enabled = true
 ttl_days = 30
 keep_per_identity = 50
 sweep_minutes = 360
+
+# WebSocket server configuration for real-time web client connections
+# WebSocket is enabled by default even without this section
+[websocket]
+enabled = true                          # Default: true (enabled by default)
+auth_enabled = true   
+path = "/api/ws/chat"
+# auth_secret = "env:TINTIN_WS_AUTH_SECRET" # Required when auth_enabled = true
+ping_interval_ms = 30000                # Server ping interval
+connection_timeout_ms = 60000           # Close inactive connections after this time
+auth_timeout_ms = 5000                  # Time allowed for authentication after connect
+max_connections = 1000                  # Maximum total WebSocket connections
+max_connections_per_identity = 5        # Maximum connections per authenticated identity
+max_message_size = 65536                # Maximum message size in bytes (64KB)
+rate_limit_messages_per_sec = 10        # Maximum messages per second per connection

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import * as toml from "@iarna/toml";
+import dotenvFlow from "dotenv-flow";
 
 export type Platform = "telegram" | "slack";
 
@@ -65,6 +66,9 @@ export interface CloudModalSection {
   app_name: string;
   image: string;
   image_id: string;
+  image_next: string;
+  image_express: string;
+  image_flask: string;
   timeout_ms: number;
   idle_timeout_ms: number;
   request_timeout_ms: number;
@@ -160,7 +164,22 @@ export interface SnapshotCleanupSection {
   sweep_minutes?: number;
 }
 
+export interface WebSocketSection {
+  enabled: boolean;
+  path: string;
+  auth_enabled: boolean;
+  auth_secret?: string;
+  ping_interval_ms: number;
+  connection_timeout_ms: number;
+  auth_timeout_ms: number;
+  max_connections: number;
+  max_connections_per_identity: number;
+  max_message_size: number;
+  rate_limit_messages_per_sec: number;
+}
+
 export interface TelegramSection {
+  enabled: boolean;
   token: string;
   additional_bot_tokens: string[];
   mode: "webhook" | "poll";
@@ -177,6 +196,7 @@ export interface TelegramSection {
 export type SlackSessionMode = "thread" | "channel";
 
 export interface SlackSection {
+  enabled: boolean;
   bot_token: string;
   signing_secret: string;
   events_path: string;
@@ -244,6 +264,7 @@ export interface AppConfig {
   cloud?: CloudSection | null;
   pinecone?: PineconeSection | null;
   chatgpt_oauth?: ChatgptOAuthSection | null;
+  websocket?: WebSocketSection | null;
   config_dir: string;
 }
 
@@ -269,27 +290,43 @@ function toStringIdArray(value: unknown): string[] {
   return out;
 }
 
+let dotenvLoaded = false;
+let dotenvLoadedPath: string | undefined = undefined;
+
+function ensureDotenvLoaded(configDir?: string): void {
+  // If already loaded for the same path, skip
+  if (dotenvLoaded && dotenvLoadedPath === configDir) return;
+
+  dotenvFlow.config({
+    path: configDir || process.cwd(),
+    silent: true,  // Don't output warnings for missing files
+  });
+  dotenvLoaded = true;
+  dotenvLoadedPath = configDir;
+}
+
 function resolveEnvSecrets(
   value: unknown,
-  opts: { allowMissing?: (path: string[]) => boolean } = {},
-  path: string[] = [],
+  opts: { allowMissing?: (path: string[]) => boolean; configDir?: string } = {},
+  currentPath: string[] = [],
 ): unknown {
   if (typeof value === "string") {
     if (value.startsWith("env:")) {
+      ensureDotenvLoaded(opts.configDir);  // Ensure dotenv files are loaded
       const key = value.slice("env:".length);
-      const resolved = process.env[key];
+      const resolved = process.env[key];  // dotenv-flow has already written to process.env
       if (!resolved) {
-        if (opts.allowMissing?.(path)) return value;
+        if (opts.allowMissing?.(currentPath)) return value;
         throw new Error(`Missing required environment variable ${key}`);
       }
       return resolved;
     }
     return value;
   }
-  if (Array.isArray(value)) return value.map((v, i) => resolveEnvSecrets(v, opts, [...path, String(i)]));
+  if (Array.isArray(value)) return value.map((v, i) => resolveEnvSecrets(v, opts, [...currentPath, String(i)]));
   if (isRecord(value)) {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v, opts, [...path, k]);
+    for (const [k, v] of Object.entries(value)) out[k] = resolveEnvSecrets(v, opts, [...currentPath, k]);
     return out;
   }
   return value;
@@ -553,6 +590,9 @@ function normalizeCloudModalSection(value: unknown): CloudModalSection {
     typeof (raw as any).app_name === "string" && (raw as any).app_name.length > 0 ? (raw as any).app_name : "tintin-cloud";
   const image = typeof (raw as any).image === "string" && (raw as any).image.length > 0 ? (raw as any).image : "debian:12";
   const image_id = typeof (raw as any).image_id === "string" ? (raw as any).image_id : "";
+  const image_next = typeof (raw as any).image_next === "string" ? (raw as any).image_next : "";
+  const image_express = typeof (raw as any).image_express === "string" ? (raw as any).image_express : "";
+  const image_flask = typeof (raw as any).image_flask === "string" ? (raw as any).image_flask : "";
   const timeout_ms =
     typeof (raw as any).timeout_ms === "number" && Number.isFinite((raw as any).timeout_ms) && (raw as any).timeout_ms > 0
       ? Math.floor((raw as any).timeout_ms)
@@ -593,6 +633,9 @@ function normalizeCloudModalSection(value: unknown): CloudModalSection {
     app_name,
     image,
     image_id,
+    image_next,
+    image_express,
+    image_flask,
     timeout_ms,
     idle_timeout_ms,
     request_timeout_ms,
@@ -864,6 +907,66 @@ function normalizeSnapshotCleanupSection(value: unknown): SnapshotCleanupSection
   return { enabled, ttl_days, keep_per_identity, sweep_minutes };
 }
 
+function normalizeWebSocketSection(value: unknown): WebSocketSection | null {
+  if (value === undefined || value === null) return null;
+  assert(isRecord(value), "[websocket] must be a table");
+
+  const enabled = typeof value.enabled === "boolean" ? value.enabled : true;
+  const pathRaw = typeof value.path === "string" ? value.path : "/api/ws/chat";
+  const pathVal = pathRaw.startsWith("/") ? pathRaw : `/${pathRaw}`;
+  const auth_enabled = typeof value.auth_enabled === "boolean" ? value.auth_enabled : false;
+  const auth_secret = typeof value.auth_secret === "string" ? value.auth_secret : undefined;
+
+  const ping_interval_ms =
+    typeof value.ping_interval_ms === "number" && Number.isFinite(value.ping_interval_ms) && value.ping_interval_ms > 0
+      ? Math.floor(value.ping_interval_ms)
+      : 30000;
+
+  const connection_timeout_ms =
+    typeof value.connection_timeout_ms === "number" && Number.isFinite(value.connection_timeout_ms) && value.connection_timeout_ms > 0
+      ? Math.floor(value.connection_timeout_ms)
+      : 60000;
+
+  const auth_timeout_ms =
+    typeof value.auth_timeout_ms === "number" && Number.isFinite(value.auth_timeout_ms) && value.auth_timeout_ms > 0
+      ? Math.floor(value.auth_timeout_ms)
+      : 5000;
+
+  const max_connections =
+    typeof value.max_connections === "number" && Number.isFinite(value.max_connections) && value.max_connections > 0
+      ? Math.floor(value.max_connections)
+      : 1000;
+
+  const max_connections_per_identity =
+    typeof value.max_connections_per_identity === "number" && Number.isFinite(value.max_connections_per_identity) && value.max_connections_per_identity > 0
+      ? Math.floor(value.max_connections_per_identity)
+      : 5;
+
+  const max_message_size =
+    typeof value.max_message_size === "number" && Number.isFinite(value.max_message_size) && value.max_message_size > 0
+      ? Math.floor(value.max_message_size)
+      : 65536; // 64KB
+
+  const rate_limit_messages_per_sec =
+    typeof value.rate_limit_messages_per_sec === "number" && Number.isFinite(value.rate_limit_messages_per_sec) && value.rate_limit_messages_per_sec > 0
+      ? value.rate_limit_messages_per_sec
+      : 10;
+
+  return {
+    enabled,
+    path: pathVal,
+    auth_enabled,
+    auth_secret,
+    ping_interval_ms,
+    connection_timeout_ms,
+    auth_timeout_ms,
+    max_connections,
+    max_connections_per_identity,
+    max_message_size,
+    rate_limit_messages_per_sec,
+  };
+}
+
 export async function loadConfig(configPath: string): Promise<AppConfig> {
   const absPath = path.resolve(configPath);
   const configDir = path.dirname(absPath);
@@ -878,6 +981,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   })();
   const resolved = resolveEnvSecrets(parsed, {
     allowMissing: (path) => !cloudEnabled && path[0] === "cloud",
+    configDir,
   }) as unknown;
   assert(isRecord(resolved), "config.toml must parse to a table");
 
@@ -984,6 +1088,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.telegram !== undefined) {
     const tg = resolved.telegram;
     assert(isRecord(tg), "[telegram] must be a table");
+    const enabled = typeof tg.enabled === "boolean" ? tg.enabled : true;
     const additionalTokensRaw = Array.isArray((tg as any).additional_bot_tokens) ? (tg as any).additional_bot_tokens : [];
     const additionalTokens: string[] = [];
     for (const t of additionalTokensRaw) {
@@ -992,6 +1097,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     const mode: TelegramSection["mode"] =
       tg.mode === "poll" || tg.mode === "webhook" ? tg.mode : "webhook";
     telegramSection = {
+      enabled,
       token: typeof tg.token === "string" ? tg.token : "",
       additional_bot_tokens: additionalTokens,
       mode,
@@ -1007,27 +1113,30 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
           : 3000,
       rate_limit_msgs_per_sec: typeof tg.rate_limit_msgs_per_sec === "number" ? tg.rate_limit_msgs_per_sec : 1.0,
     };
-    assert(telegramSection.token.length > 0, "[telegram].token is required");
-    assert(telegramSection.message_queue_interval_ms >= 0, "[telegram].message_queue_interval_ms must be >= 0");
-    if (telegramSection.mode === "webhook") {
-      assert(
-        telegramSection.webhook_secret_token.length > 0,
-        "[telegram].webhook_secret_token is required in webhook mode",
-      );
-      if (telegramSection.public_base_url.length > 0) {
-        telegramSection.public_base_url = normalizeUrl(
-          telegramSection.public_base_url,
-          "[telegram].public_base_url",
+    // Only validate required fields when enabled
+    if (telegramSection.enabled) {
+      assert(telegramSection.token.length > 0, "[telegram].token is required when enabled");
+      assert(telegramSection.message_queue_interval_ms >= 0, "[telegram].message_queue_interval_ms must be >= 0");
+      if (telegramSection.mode === "webhook") {
+        assert(
+          telegramSection.webhook_secret_token.length > 0,
+          "[telegram].webhook_secret_token is required in webhook mode",
+        );
+        if (telegramSection.public_base_url.length > 0) {
+          telegramSection.public_base_url = normalizeUrl(
+            telegramSection.public_base_url,
+            "[telegram].public_base_url",
+          );
+        }
+      } else {
+        assert(
+          telegramSection.poll_timeout_seconds >= 0 && telegramSection.poll_timeout_seconds <= 50,
+          "[telegram].poll_timeout_seconds must be between 0 and 50",
         );
       }
-    } else {
-      assert(
-        telegramSection.poll_timeout_seconds >= 0 && telegramSection.poll_timeout_seconds <= 50,
-        "[telegram].poll_timeout_seconds must be between 0 and 50",
-      );
-    }
-    if (telegramSection.public_base_url.length > 0 && telegramSection.mode === "poll") {
-      telegramSection.public_base_url = normalizeUrl(telegramSection.public_base_url, "[telegram].public_base_url");
+      if (telegramSection.public_base_url.length > 0 && telegramSection.mode === "poll") {
+        telegramSection.public_base_url = normalizeUrl(telegramSection.public_base_url, "[telegram].public_base_url");
+      }
     }
   }
 
@@ -1035,9 +1144,11 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.slack !== undefined) {
     const s = resolved.slack;
     assert(isRecord(s), "[slack] must be a table");
+    const enabled = typeof s.enabled === "boolean" ? s.enabled : true;
     const mode = typeof s.session_mode === "string" ? s.session_mode : "thread";
     assert(mode === "thread" || mode === "channel", "[slack].session_mode must be 'thread' or 'channel'");
     slackSection = {
+      enabled,
       bot_token: typeof s.bot_token === "string" ? s.bot_token : "",
       signing_secret: typeof s.signing_secret === "string" ? s.signing_secret : "",
       events_path: normalizeHttpPath(typeof s.events_path === "string" ? s.events_path : "/slack/events", "[slack].events_path"),
@@ -1049,8 +1160,11 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       max_chars: typeof s.max_chars === "number" ? s.max_chars : 3000,
       rate_limit_msgs_per_sec: typeof s.rate_limit_msgs_per_sec === "number" ? s.rate_limit_msgs_per_sec : 1.0,
     };
-    assert(slackSection.bot_token.length > 0, "[slack].bot_token is required");
-    assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
+    // Only validate required fields when enabled
+    if (slackSection.enabled) {
+      assert(slackSection.bot_token.length > 0, "[slack].bot_token is required when enabled");
+      assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required when enabled");
+    }
   }
 
   const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
@@ -1061,6 +1175,8 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   const cloud = normalizeCloudSection((resolved as any).cloud, { configDir, dataDir: botSection.data_dir });
   const pinecone = normalizePineconeSection((resolved as any).pinecone);
   const chatgpt_oauth = normalizeChatgptOAuthSection(cloud);
+  // WebSocket is enabled by default even without [websocket] section
+  const websocket = normalizeWebSocketSection((resolved as any).websocket ?? {});
   if (cloud?.enabled && cloud.public_base_url.length > 0) {
     cloud.public_base_url = normalizeUrl(cloud.public_base_url, "[cloud].public_base_url");
   }
@@ -1072,7 +1188,14 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     cloud.proxy.anthropic_base_url = normalizeUrl(cloud.proxy.anthropic_base_url, "[cloud].proxy.anthropic_base_url");
   }
 
-  assert(telegramSection || slackSection, "At least one of [telegram] or [slack] must be configured");
+  // At least one platform/interface must be enabled
+  const telegramEnabled = telegramSection?.enabled ?? false;
+  const slackEnabled = slackSection?.enabled ?? false;
+  const websocketEnabled = websocket?.enabled ?? false;
+  assert(
+    telegramEnabled || slackEnabled || websocketEnabled,
+    "At least one of [telegram], [slack], or [websocket] must be enabled",
+  );
 
   return {
     bot: botSection,
@@ -1087,6 +1210,7 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     cloud,
     pinecone,
     chatgpt_oauth,
+    websocket,
     config_dir: configDir,
   };
 }

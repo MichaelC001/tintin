@@ -217,7 +217,7 @@ export class JsonlStreamer {
             const mapper = EVENT_MAPPERS[session.agent];
             fragments.push(
               ...mapper(obj, {
-                includeUserMessages: session.platform !== "telegram",
+                includeUserMessages: session.platform !== "telegram" && session.platform !== "websocket",
                 verbosity: messageVerbosity,
                 lang,
               }),
@@ -2223,3 +2223,31 @@ function formatToolPairMessage(opts: { callText: string | null; outputText: stri
 
   return "```" + "\n" + clippedInner + "\n" + "```";
 }
+
+// Re-export from modular implementation for migration path.
+// Note: mapEventToFragments, StreamFragment, MessageVerbosity are defined in this file,
+// so they are not re-exported to avoid conflicts.
+export {
+  ToolCallManager,
+  PlanUpdateHandler,
+  parsePlanUpdatePayload,
+  PlaywrightScreenshotManager,
+  parseMcpFunctionName,
+  extractPlaywrightInlineScreenshot,
+  EVENT_MAPPERS,
+  mapCodexEventToFragments,
+  mapClaudeEventToFragments,
+  mapEventMsgPayload,
+  stringOrEmpty,
+  numberOrNull,
+  normalizeMessageVerbosity,
+  formatTitledText,
+  truncateJson,
+  truncateLogLine,
+  normalizeAgentMessage,
+  extractMcpResultText,
+  getTextFromContentItems,
+  formatToolPairMessage as formatToolPairMessageHelper,
+} from "./streamer/index.js";
+
+export { formatToolPairMessage };
