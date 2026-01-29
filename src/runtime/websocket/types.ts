@@ -231,6 +231,7 @@ export interface RunLinksMessage {
   runId: string;
   sessionId: string;
   viewUrl?: string;
+  codeProxyUrl?: string;
   vscodeUrl?: string;
 }
 
