@@ -21,6 +21,7 @@ import { buildCloneUrl } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
+import { buildAgentsMdContent } from "./prompts.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { buildLocalizedPrompt } from "../prompt.js";
 import {
@@ -2295,6 +2296,60 @@ export class CloudManager {
     });
     if (result.exitCode !== 0) {
       throw new Error(`Failed to create remote dir ${dir}`);
+    }
+  }
+
+  /**
+   * Ensure AGENTS.md exists on the remote sandbox with all prompts and locale directive.
+   * This writes to /home/ubuntu/.codex/AGENTS.md.
+   */
+  private async ensureRemoteAgentsMd(
+    sandbox: Sandbox,
+    language: UserLanguage,
+    timeoutMs: number,
+  ): Promise<void> {
+    if (this.provider.id !== "modal") return; // Only for Modal provider
+
+    try {
+      const content = await buildAgentsMdContent(language);
+      const agentsDir = "/home/ubuntu/.codex";
+      const agentsPath = "/home/ubuntu/.codex/AGENTS.md";
+
+      // Ensure directory exists
+      await this.runRemoteCommand(sandbox, `mkdir -p ${shellQuote(agentsDir)}`, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      // Escape content for heredoc - replace $ with \$
+      const escaped = content.replace(/\$/g, "\\$");
+
+      // Write via heredoc
+      const script = `cat > ${shellQuote(agentsPath)} << 'AGENTS_EOF'
+${escaped}
+AGENTS_EOF`;
+
+      await this.runRemoteCommand(sandbox, script, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      // Set ownership
+      await this.runRemoteCommand(sandbox, `chown ubuntu:ubuntu ${shellQuote(agentsPath)}`, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      this.logger.info(`[cloud] AGENTS.md written to remote (language=${language}, bytes=${content.length})`);
+    } catch (e) {
+      this.logger.warn(`[cloud] failed to write AGENTS.md: ${String(e)}`);
+      // Continue anyway - degraded mode is acceptable
     }
   }
 
