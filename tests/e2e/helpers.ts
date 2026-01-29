@@ -7,6 +7,23 @@ import type { DatabaseSchema } from "../../src/runtime/db.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+// Helper to parse SQLAlchemy-style SQLite URLs
+function parseSqliteFilePath(sqliteUrl: string, baseDir: string): string {
+  // Supports SQLAlchemy-style:
+  // - sqlite+aiosqlite:///./relative.db
+  // - sqlite:////absolute/path.db
+  // - sqlite:///:memory:
+  const m = sqliteUrl.match(/^sqlite(?:\+[^:]+)?:([/]{0,4})(.*)$/);
+  if (!m) throw new Error(`Invalid sqlite URL: ${sqliteUrl}`);
+  const slashes = m[1] ?? "";
+  const rest = m[2] ?? "";
+  if (rest === ":memory:" || rest.startsWith(":memory:")) return ":memory:";
+  if (slashes === "////") return `/${rest}`;
+  if (slashes === "///") return path.resolve(baseDir, rest);
+  if (slashes === "//") throw new Error(`sqlite URL with authority not supported: ${sqliteUrl}`);
+  return path.resolve(baseDir, `${slashes}${rest}`);
+}
+
 // Type for ws library WebSocket (Node.js, not browser)
 // Import the type from the ws package
 import type { WebSocket as WebSocketWs } from "ws";
@@ -20,6 +37,8 @@ export interface E2EConfig {
   requestTimeoutMs: number;
   proxySecret: string;
   dataDir: string;
+  configDir: string;
+  dbUrl: string;
 }
 
 export interface E2EFixtures {
@@ -41,10 +60,9 @@ export async function loadE2EConfig(configPath: string): Promise<E2EConfig> {
 
   const wsPort = config.bot.port;
   const wsPath = config.websocket?.path ?? "/api/ws/chat";
-  const wsBaseUrl = config.cloud?.public_base_url
-    ? new URL(config.cloud.public_base_url).origin
-    : `ws://localhost:${wsPort}`;
-  const wsUrl = `${wsBaseUrl}${wsPath}`;
+
+  // For E2E tests, always use localhost (not public_base_url which may be a placeholder)
+  const wsUrl = `ws://localhost:${wsPort}${wsPath}`;
 
   const cloud = config.cloud;
   if (!cloud?.enabled) {
@@ -66,6 +84,8 @@ export async function loadE2EConfig(configPath: string): Promise<E2EConfig> {
     requestTimeoutMs: cloud.modal.request_timeout_ms || 300_000,
     proxySecret: cloud.proxy.shared_secret,
     dataDir: config.bot.data_dir,
+    configDir: config.config_dir,
+    dbUrl: config.db.url,
   };
 }
 
@@ -82,17 +102,19 @@ export class WebSocketClient {
   constructor(private url: string) {}
 
   async connect(): Promise<void> {
-    return new Promise((resolve, reject) => {
-      // Import ws dynamically since it's a CJS module
-      let WebSocketClient: any;
-      try {
-        WebSocketClient = require("ws");
-      } catch {
-        reject(new Error("ws module not available. Install with: npm install ws"));
-        return;
-      }
+    // Import ws dynamically - it's a CJS module that works with createRequire
+    const { createRequire } = await import("module");
+    const require = createRequire(import.meta.url);
+    let WebSocketClass: any;
 
-      this.ws = new WebSocketClient(this.url);
+    try {
+      WebSocketClass = require("ws");
+    } catch {
+      return Promise.reject(new Error("ws module not available. Install with: npm install ws"));
+    }
+
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocketClass(this.url);
 
       if (!this.ws) {
         reject(new Error("Failed to create WebSocket"));
@@ -243,8 +265,8 @@ function sleep(ms: number): Promise<void> {
 export async function getTestFixtures(configPath: string): Promise<E2EFixtures> {
   const config = await loadE2EConfig(configPath);
 
-  // Initialize DB connection
-  const dbPath = path.join(config.dataDir, "tintin.db");
+  // Initialize DB connection - parse the SQLite URL
+  const dbPath = parseSqliteFilePath(config.dbUrl, config.configDir);
   const db = new Kysely<DatabaseSchema>({
     dialect: new SqliteDialect({
       database: new Database(dbPath),
@@ -252,16 +274,15 @@ export async function getTestFixtures(configPath: string): Promise<E2EFixtures> 
   });
 
   try {
-    // Find first GitHub identity
+    // Find first identity (any platform - github, slack, websocket, etc.)
     const identityRow = await db
       .selectFrom("identities")
       .select("id")
-      .where("platform", "=", "github")
       .limit(1)
       .executeTakeFirst();
 
     if (!identityRow) {
-      throw new Error("No GitHub identity found. Run tests with at least one GitHub identity configured.");
+      throw new Error("No identity found in database. Run tests with at least one identity configured.");
     }
 
     // Find first repo

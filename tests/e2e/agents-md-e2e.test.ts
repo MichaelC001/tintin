@@ -17,6 +17,14 @@ if (!existsSync(CONFIG_PATH)) {
   process.exit(0);
 }
 
+// Skip E2E tests unless explicitly enabled (requires Modal resources)
+if (!process.env.E2E_TESTS_ENABLED) {
+  console.log("[SKIP] E2E tests require Modal resources. Set E2E_TESTS_ENABLED=1 to run.");
+  console.log("[SKIP] These tests validate AGENTS.md content in Modal sandboxes.");
+  console.log("[SKIP] Ensure your Modal account has available resources before running.");
+  process.exit(0);
+}
+
 describe("E2E: AGENTS.md Prompts", () => {
   let config: E2EConfig;
   let ws: WebSocketClient;
@@ -24,6 +32,7 @@ describe("E2E: AGENTS.md Prompts", () => {
   let sandboxId: string | null;
   let testIdentityId: string;
   let testRepoId: string;
+  let identityId: string;
 
   before(async () => {
     const fixtures = await getTestFixtures(CONFIG_PATH);
@@ -33,6 +42,18 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws = new WebSocketClient(config.wsUrl);
     await ws.connect();
+
+    // Authenticate (required even in no-auth mode to set up anonymous identity)
+    ws.send({ type: "auth" });
+
+    // Wait for auth_ok
+    const authOk = await ws.waitForMessage(
+      (msg: any) => msg.type === "auth_ok",
+      5000
+    );
+
+    assert.ok(authOk, "Should receive auth_ok message");
+    identityId = authOk.identityId || testIdentityId;
   });
 
   after(async () => {
