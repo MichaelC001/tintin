@@ -66,7 +66,9 @@ export interface CloudRunMessage {
   repoIds?: string[];              // repo IDs (empty array = playground mode)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
-  restoreSnapshotId?: string;      // optional, restore from snapshot
+  restoreSnapshotId?: string;      // optional, restore from specified snapshot
+  autoRestore?: boolean;           // optional, auto-restore from latest snapshot
+  lastRunId?: string;              // optional, restore from specific run's snapshot
 }
 
 export interface SubscribeRunMessage {
@@ -261,7 +263,10 @@ export type ServerMessage =
   | OAuthStartedMessage
   | RunStatusMessage
   | RunLinksMessage
-  | BrowserSessionMessage;
+  | BrowserSessionMessage
+  | SandboxStatusMessage
+  | SandboxReadyMessage
+  | SandboxErrorMessage;
 
 // ============ Error Codes ============
 
@@ -277,6 +282,58 @@ export const ErrorCodes = {
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
 
+// ============ Connection Sandbox State ============
+
+/**
+ * Sandbox status for a WebSocket connection.
+ * - provisioning: Workspace is being created
+ * - ready: Workspace is ready for use
+ * - in_use: An agent run is active in the sandbox
+ * - terminating: Workspace is being terminated
+ * - error: Sandbox provisioning or operation failed
+ */
+export type ConnectionSandboxStatus =
+  | 'provisioning'
+  | 'ready'
+  | 'in_use'
+  | 'terminating'
+  | 'error';
+
+/**
+ * Represents a sandbox (workspace) tied to a WebSocket connection.
+ * Created on auth success, destroyed on disconnect.
+ */
+export interface ConnectionSandbox {
+  workspaceId: string;
+  rootPath: string;
+  status: ConnectionSandboxStatus;
+  runId: string | null;
+  sessionId: string | null;
+  dbIdentityId: string;
+  createdAt: number;
+  error: string | null;
+}
+
+// ============ Sandbox Messages (Server → Client) ============
+
+export interface SandboxStatusMessage {
+  type: 'sandbox_status';
+  status: ConnectionSandboxStatus;
+  workspaceId?: string;
+  message?: string;
+}
+
+export interface SandboxReadyMessage {
+  type: 'sandbox_ready';
+  workspaceId: string;
+}
+
+export interface SandboxErrorMessage {
+  type: 'sandbox_error';
+  message: string;
+  recoverable: boolean;
+}
+
 // ============ Connection State ============
 
 export interface WSConnection {
@@ -289,6 +346,7 @@ export interface WSConnection {
   lastActivityAt: number;
   createdAt: number;
   messageCount: number;
+  sandbox: ConnectionSandbox | null;
 }
 
 // ============ WebSocket Config ============

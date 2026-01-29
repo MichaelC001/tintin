@@ -7,6 +7,7 @@ import type { CloudRunMessage, WSConnection } from '../types.js';
 import { ErrorCodes } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { CloudLinkBuilder } from './linkBuilder.js';
+import type { SandboxLifecycleService } from './sandboxLifecycle.js';
 import { listReposForIdentity, getCloudRun } from '../../cloud/store.js';
 import { mapDbStatusToWsStatus } from '../../cloud/types.js';
 
@@ -25,6 +26,7 @@ export class CloudRunService {
     private readonly config: AppConfig,
     private readonly db: Db,
     private readonly logger: Logger,
+    private readonly sandboxService: SandboxLifecycleService | null = null,
   ) {
     this.identityResolver = new IdentityResolver(db);
     this.linkBuilder = new CloudLinkBuilder(config);
@@ -43,6 +45,47 @@ export class CloudRunService {
         message: 'Prompt is required',
       });
       return;
+    }
+
+    // Check sandbox status if sandboxService is available
+    if (this.sandboxService) {
+      const { status, error } = this.sandboxService.getSandboxStatus(connId);
+
+      if (status === 'provisioning') {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: 'Sandbox is still provisioning. Please wait for sandbox_ready message.',
+        });
+        return;
+      }
+
+      if (status === 'in_use') {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: 'Sandbox is currently in use. Stop the current run first.',
+        });
+        return;
+      }
+
+      if (status === 'error') {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: `Sandbox error: ${error ?? 'Unknown error'}. Please reconnect.`,
+        });
+        return;
+      }
+
+      if (status === 'terminating') {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: 'Sandbox is terminating. Please reconnect.',
+        });
+        return;
+      }
     }
 
     try {
@@ -66,6 +109,22 @@ export class CloudRunService {
       // Determine agent
       const agent = message.agent ?? (this.config.cloud?.default_agent === 'claude_code' ? 'claude_code' : 'codex');
 
+      // Determine snapshot ID for restore
+      // Priority: explicit restoreSnapshotId > autoRestore detection
+      let restoreSnapshotId = message.restoreSnapshotId ?? null;
+
+      if (!restoreSnapshotId && message.autoRestore) {
+        restoreSnapshotId = await this.cloudManager.detectLatestSnapshot({
+          identityId: dbIdentityId,
+          lastRunId: message.lastRunId ?? null,
+        });
+        if (restoreSnapshotId) {
+          this.logger.info(
+            `[ws][cloud] auto-restore snapshot=${restoreSnapshotId} connId=${connId} lastRunId=${message.lastRunId ?? 'none'}`,
+          );
+        }
+      }
+
       // Send initial status
       this.wsManager.sendToConnection(connId, {
         type: 'run_status',
@@ -78,20 +137,62 @@ export class CloudRunService {
       const virtualChatId = `ws:${conn.identityId}`;
       const virtualSpaceId = `${Date.now()}`;
 
-      // Start cloud run
-      const { runId, sessionId, cdpUrl } = await this.cloudManager.startRun({
-        identityId: dbIdentityId,
-        platform: 'websocket',
-        workspaceId: null,
-        chatId: virtualChatId,
-        spaceId: virtualSpaceId,
-        userId: conn.identityId!,
-        prompt,
-        repoIds,
-        agent,
-        playground: isPlayground,
-        restoreSnapshotId: message.restoreSnapshotId ?? null,
-      });
+      let runId: string;
+      let sessionId: string;
+      let cdpUrl: string | null;
+
+      // Check if we can use an existing connection sandbox
+      const sandbox = this.sandboxService?.getSandbox(connId);
+
+      if (sandbox) {
+        // Use existing workspace via startRunWithWorkspace
+        this.logger.info(
+          `[ws][cloud] using connection sandbox connId=${connId} workspaceId=${sandbox.workspaceId}`,
+        );
+
+        const result = await this.cloudManager.startRunWithWorkspace({
+          workspace: { id: sandbox.workspaceId, rootPath: sandbox.rootPath },
+          identityId: dbIdentityId,
+          platform: 'websocket',
+          workspaceId: null,
+          chatId: virtualChatId,
+          spaceId: virtualSpaceId,
+          userId: conn.identityId!,
+          prompt,
+          repoIds,
+          agent,
+          playground: isPlayground,
+          restoreSnapshotId,
+        });
+
+        runId = result.runId;
+        sessionId = result.sessionId;
+        cdpUrl = result.cdpUrl;
+
+        // Mark sandbox as in use
+        this.sandboxService!.markInUse(connId, runId, sessionId);
+      } else {
+        // Fall back to creating a new workspace (legacy behavior)
+        this.logger.info(`[ws][cloud] no connection sandbox, using startRun connId=${connId}`);
+
+        const result = await this.cloudManager.startRun({
+          identityId: dbIdentityId,
+          platform: 'websocket',
+          workspaceId: null,
+          chatId: virtualChatId,
+          spaceId: virtualSpaceId,
+          userId: conn.identityId!,
+          prompt,
+          repoIds,
+          agent,
+          playground: isPlayground,
+          restoreSnapshotId,
+        });
+
+        runId = result.runId;
+        sessionId = result.sessionId;
+        cdpUrl = result.cdpUrl;
+      }
 
       // Subscribe connection to session
       this.wsManager.subscribeToSession(connId, sessionId);
@@ -135,6 +236,12 @@ export class CloudRunService {
       );
     } catch (err) {
       this.logger.error(`[ws][cloud] handleCloudRun error connId=${connId}: ${String(err)}`);
+
+      // Mark sandbox as ready again on error (if using sandbox)
+      if (this.sandboxService) {
+        this.sandboxService.markReady(connId);
+      }
+
       this.wsManager.sendToConnection(connId, {
         type: 'error',
         code: ErrorCodes.SERVICE_ERROR,

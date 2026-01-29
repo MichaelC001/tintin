@@ -39,6 +39,21 @@ const HTTP_BAD_GATEWAY = 502;
 const HTTP_INTERNAL_ERROR = 500;
 
 /**
+ * Check if a WebSocket close code can be sent in a close frame.
+ * RFC 6455: codes 1005, 1006, 1015 are reserved and MUST NOT be sent.
+ *
+ * Valid codes: 1000-1003, 1007-1011, 3000-4999
+ */
+export function isValidCloseCode(code: number): boolean {
+  // Reserved codes that cannot be sent in a close frame
+  if (code === 1005 || code === 1006 || code === 1015) {
+    return false;
+  }
+  // Standard codes (1000-1011) and private-use codes (3000-4999)
+  return (code >= 1000 && code <= 1011) || (code >= 3000 && code <= 4999);
+}
+
+/**
  * CodeProxyHandler handles HTTP and WebSocket proxying to code-server.
  *
  * Follows SRP: Only responsible for proxying requests to code-server.
@@ -186,6 +201,9 @@ export class CodeProxyHandler {
    *
    * Both clientWs and upstreamWs are proper WebSocket objects, so message
    * framing is handled correctly by the ws library.
+   *
+   * CRITICAL: Error handlers must be registered immediately after WebSocket
+   * creation to avoid race conditions where errors fire before handlers exist.
    */
   private proxyWebSocket(
     sessionId: string,
@@ -202,85 +220,117 @@ export class CodeProxyHandler {
 
     const headers = this.buildWebSocketHeaders(req, tunnelUrl);
 
-    const upstreamWs = new WebSocket(targetUrl.toString(), {
-      headers,
-      handshakeTimeout: 10000,
-    });
-
     let upstreamConnected = false;
+    let upstreamWs: WebSocket | null = null;
+    let cleanedUp = false; // Idempotent guard for cleanup
 
-    upstreamWs.on("open", () => {
-      upstreamConnected = true;
-      this.logger.debug(`[code-proxy] ws connected session=${sessionId}`);
-    });
+    // Cleanup function to ensure both connections are properly closed
+    // Safe to call multiple times (from error, close, or catch handlers)
+    const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
 
-    // Bidirectional message forwarding
-    clientWs.on("message", (data, isBinary) => {
-      if (upstreamWs.readyState === WebSocket.OPEN) {
-        upstreamWs.send(data, { binary: isBinary });
-      }
-    });
-
-    upstreamWs.on("message", (data, isBinary) => {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.send(data, { binary: isBinary });
-      }
-    });
-
-    // Close event handling
-    clientWs.on("close", (code, reason) => {
-      this.logger.debug(`[code-proxy] client ws closed session=${sessionId} code=${code}`);
-      if (upstreamWs.readyState !== WebSocket.CLOSED) {
-        upstreamWs.close(code, reason);
-      }
-    });
-
-    upstreamWs.on("close", (code, reason) => {
-      this.logger.debug(`[code-proxy] upstream ws closed session=${sessionId} code=${code}`);
-      if (clientWs.readyState !== WebSocket.CLOSED) {
-        clientWs.close(code, reason);
-      }
-    });
-
-    // Error handling
-    clientWs.on("error", (err) => {
-      this.logger.debug(`[code-proxy] client ws error session=${sessionId}: ${String(err)}`);
-      if (upstreamWs.readyState !== WebSocket.CLOSED) {
+      if (upstreamWs && upstreamWs.readyState !== WebSocket.CLOSED) {
         upstreamWs.close();
       }
-    });
-
-    upstreamWs.on("error", (err) => {
-      this.logger.debug(`[code-proxy] upstream ws error session=${sessionId}: ${String(err)}`);
-      if (!upstreamConnected && clientWs.readyState === WebSocket.OPEN) {
-        clientWs.close(1011, "Upstream connection failed");
+      if (clientWs.readyState !== WebSocket.CLOSED) {
+        clientWs.close();
       }
-    });
+    };
 
-    // Ping/Pong forwarding for connection keepalive
-    clientWs.on("ping", (data) => {
-      if (upstreamWs.readyState === WebSocket.OPEN) {
-        upstreamWs.ping(data);
-      }
-    });
+    try {
+      this.logger.debug(`[code-proxy] connecting to upstream session=${sessionId} url=${targetUrl.toString()}`);
 
-    upstreamWs.on("ping", (data) => {
+      upstreamWs = new WebSocket(targetUrl.toString(), {
+        headers,
+        handshakeTimeout: 10000,
+      });
+
+      // CRITICAL: Register error handlers IMMEDIATELY after WebSocket creation
+      // to prevent unhandled errors if connection fails before other handlers are set up
+      upstreamWs.on("error", (err) => {
+        this.logger.debug(`[code-proxy] upstream ws error session=${sessionId}: ${String(err)}`);
+        if (!upstreamConnected) {
+          // Upstream connection failed before it was established
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.close(1011, "Upstream connection failed");
+          }
+        }
+        cleanup();
+      });
+
+      // Client error handler also registered immediately
+      clientWs.on("error", (err) => {
+        this.logger.debug(`[code-proxy] client ws error session=${sessionId}: ${String(err)}`);
+        cleanup();
+      });
+
+      upstreamWs.on("open", () => {
+        upstreamConnected = true;
+        this.logger.debug(`[code-proxy] ws connected session=${sessionId}`);
+      });
+
+      // Bidirectional message forwarding
+      clientWs.on("message", (data, isBinary) => {
+        if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+          upstreamWs.send(data, { binary: isBinary });
+        }
+      });
+
+      upstreamWs.on("message", (data, isBinary) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.send(data, { binary: isBinary });
+        }
+      });
+
+      // Close event handling
+      clientWs.on("close", (code, _reason) => {
+        this.logger.debug(`[code-proxy] client ws closed session=${sessionId} code=${code}`);
+        cleanup();
+      });
+
+      upstreamWs.on("close", (code, reason) => {
+        this.logger.debug(`[code-proxy] upstream ws closed session=${sessionId} code=${code}`);
+        if (clientWs.readyState !== WebSocket.CLOSED) {
+          // Use valid fallback code if upstream sends reserved code (e.g., 1006 = abnormal closure)
+          // RFC 6455: codes 1005, 1006, 1015 cannot be sent in a close frame
+          const safeCode = isValidCloseCode(code) ? code : 1011;
+          clientWs.close(safeCode, reason);
+        }
+      });
+
+      // Ping/Pong forwarding for connection keepalive
+      clientWs.on("ping", (data) => {
+        if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+          upstreamWs.ping(data);
+        }
+      });
+
+      upstreamWs.on("ping", (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.ping(data);
+        }
+      });
+
+      clientWs.on("pong", (data) => {
+        if (upstreamWs && upstreamWs.readyState === WebSocket.OPEN) {
+          upstreamWs.pong(data);
+        }
+      });
+
+      upstreamWs.on("pong", (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) {
+          clientWs.pong(data);
+        }
+      });
+    } catch (err) {
+      // Handle synchronous errors (e.g., URL parsing)
+      this.logger.warn(`[code-proxy] ws proxy setup error session=${sessionId}: ${String(err)}`);
       if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.ping(data);
+        clientWs.close(1011, "Internal error");
       }
-    });
-
-    clientWs.on("pong", (data) => {
-      if (upstreamWs.readyState === WebSocket.OPEN) {
-        upstreamWs.pong(data);
-      }
-    });
-
-    upstreamWs.on("pong", (data) => {
-      if (clientWs.readyState === WebSocket.OPEN) {
-        clientWs.pong(data);
-      }
-    });
+      cleanup();
+    }
   }
 
   /**
@@ -295,10 +345,11 @@ export class CodeProxyHandler {
       if (SKIP_REQUEST_HEADERS.has(lowerKey)) continue;
       if (lowerKey === "host") {
         headers[key] = targetHost;
-      } else if (typeof value === "string") {
-        headers[key] = value;
-      } else if (Array.isArray(value)) {
-        headers[key] = value.join(", ");
+      } else {
+        const normalized = this.normalizeHeaderValue(value);
+        if (normalized !== undefined) {
+          headers[key] = normalized;
+        }
       }
     }
     // Ensure host is set
@@ -319,15 +370,28 @@ export class CodeProxyHandler {
       if (SKIP_REQUEST_HEADERS.has(lowerKey)) continue;
       if (lowerKey === "host") continue;
 
-      if (typeof value === "string") {
-        headers[key] = value;
-      } else if (Array.isArray(value)) {
-        headers[key] = value.join(", ");
+      const normalized = this.normalizeHeaderValue(value);
+      if (normalized !== undefined) {
+        headers[key] = normalized;
       }
     }
     headers["host"] = targetHost;
     headers["origin"] = tunnelUrl;
     return headers;
+  }
+
+  /**
+   * Normalize header value to string format.
+   * Handles string, string[], or undefined header values.
+   */
+  private normalizeHeaderValue(value: string | string[] | undefined): string | undefined {
+    if (typeof value === "string") {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.join(", ");
+    }
+    return undefined;
   }
 
   /**

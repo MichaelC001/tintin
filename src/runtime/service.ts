@@ -1607,6 +1607,15 @@ export async function createBotService(deps: BotServiceDeps) {
     wsManager = new WebSocketManager(config.websocket, logger);
     wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
     wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
+
+    // Set up disconnect handler for sandbox termination
+    if (cloudManager && wsHandler.sandboxLifecycleService) {
+      const sandboxService = wsHandler.sandboxLifecycleService;
+      wsManager.setDisconnectHandler(async (connId, conn) => {
+        await sandboxService.terminateSandbox(connId, conn);
+      });
+    }
+
     wsManager.startHeartbeat();
     logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);
   }

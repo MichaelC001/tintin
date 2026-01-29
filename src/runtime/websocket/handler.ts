@@ -8,12 +8,13 @@ import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth, requireSessionId } from './guards.js';
-import { SessionService, GitHubService, CloudRunService } from './services/index.js';
+import { SessionService, GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export class WebSocketHandler {
   private readonly sessionService: SessionService;
   private readonly githubService: GitHubService;
   private readonly cloudRunService: CloudRunService | null;
+  readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -37,8 +38,14 @@ export class WebSocketHandler {
       db,
       logger,
     );
+
+    // Initialize sandbox lifecycle service if cloud is enabled
+    this.sandboxLifecycleService = cloudManager
+      ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
+      : null;
+
     this.cloudRunService = cloudManager
-      ? new CloudRunService(wsManager, cloudManager, config, db, logger)
+      ? new CloudRunService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
       : null;
   }
 
@@ -186,6 +193,11 @@ export class WebSocketHandler {
         identityId,
       });
       this.logger.debug(`[ws] auth ok (no-auth mode) id=${connId} identity=${identityId}`);
+
+      // Provision sandbox after successful auth (async, non-blocking)
+      if (this.sandboxLifecycleService) {
+        void this.sandboxLifecycleService.provisionSandbox(connId, identityId);
+      }
       return;
     }
 
@@ -237,5 +249,10 @@ export class WebSocketHandler {
       identityId: verified.identityId,
     });
     this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);
+
+    // Provision sandbox after successful auth (async, non-blocking)
+    if (this.sandboxLifecycleService) {
+      void this.sandboxLifecycleService.provisionSandbox(connId, verified.identityId);
+    }
   }
 }

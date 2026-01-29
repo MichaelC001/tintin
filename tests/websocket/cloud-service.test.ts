@@ -49,17 +49,32 @@ interface StartRunResult {
   cdpUrl: string | null;
 }
 
-function createMockCloudManager(result: Partial<StartRunResult> = {}) {
+interface MockCloudManagerOptions {
+  result?: Partial<StartRunResult>;
+  detectLatestSnapshotResult?: string | null;
+  startRunCapture?: Array<{ restoreSnapshotId: string | null }>;
+}
+
+function createMockCloudManager(options: MockCloudManagerOptions = {}) {
   const defaultResult: StartRunResult = {
     runId: "run-123",
     sessionId: "session-456",
     cdpUrl: null,
-    ...result,
+    ...options.result,
   };
 
+  const startRunCapture = options.startRunCapture ?? [];
+
   return {
-    startRun: async () => defaultResult,
-  } as unknown as CloudManager;
+    startRun: async (opts: { restoreSnapshotId?: string | null }) => {
+      startRunCapture.push({ restoreSnapshotId: opts.restoreSnapshotId ?? null });
+      return defaultResult;
+    },
+    detectLatestSnapshot: async () => options.detectLatestSnapshotResult ?? null,
+    _getStartRunCaptures: () => startRunCapture,
+  } as unknown as CloudManager & {
+    _getStartRunCaptures: () => Array<{ restoreSnapshotId: string | null }>;
+  };
 }
 
 function createMockDb() {
@@ -114,9 +129,11 @@ test("CloudRunService handleCloudRun", async (t) => {
   await t.test("should send browser_session message when cdpUrl is available", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
-      runId: "run-abc",
-      sessionId: "session-xyz",
-      cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      },
     });
     const db = createMockDb();
     const config = createMockConfig();
@@ -151,9 +168,11 @@ test("CloudRunService handleCloudRun", async (t) => {
   await t.test("should not send browser_session message when cdpUrl is null", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
-      runId: "run-abc",
-      sessionId: "session-xyz",
-      cdpUrl: null,
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: null,
+      },
     });
     const db = createMockDb();
     const config = createMockConfig();
@@ -178,9 +197,11 @@ test("CloudRunService handleCloudRun", async (t) => {
   await t.test("should send session_started message before browser_session", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
-      runId: "run-abc",
-      sessionId: "session-xyz",
-      cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      },
     });
     const db = createMockDb();
     const config = createMockConfig();
@@ -237,9 +258,11 @@ test("CloudRunService handleCloudRun", async (t) => {
   await t.test("should subscribe connection to session", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
-      runId: "run-abc",
-      sessionId: "session-xyz",
-      cdpUrl: null,
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: null,
+      },
     });
     const db = createMockDb();
     const config = createMockConfig();
@@ -291,5 +314,153 @@ test("mapDbStatusToWsStatus", async (t) => {
   await t.test("should map unknown status to preparing", () => {
     assert.equal(mapDbStatusToWsStatus("unknown"), "preparing");
     assert.equal(mapDbStatusToWsStatus("anything"), "preparing");
+  });
+});
+
+test("CloudRunService auto-restore", async (t) => {
+  await t.test("should auto-restore when autoRestore=true and snapshot exists", async () => {
+    const wsManager = createMockWsManager();
+    const startRunCapture: Array<{ restoreSnapshotId: string | null }> = [];
+    const cloudManager = createMockCloudManager({
+      result: { runId: "run-abc", sessionId: "session-xyz", cdpUrl: null },
+      detectLatestSnapshotResult: "snap-detected-123",
+      startRunCapture,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Continue work",
+      repoIds: [],
+      autoRestore: true,
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const captures = cloudManager._getStartRunCaptures();
+    assert.equal(captures.length, 1, "startRun should be called once");
+    assert.equal(captures[0]?.restoreSnapshotId, "snap-detected-123", "should use detected snapshot");
+  });
+
+  await t.test("should not auto-restore when autoRestore=false", async () => {
+    const wsManager = createMockWsManager();
+    const startRunCapture: Array<{ restoreSnapshotId: string | null }> = [];
+    const cloudManager = createMockCloudManager({
+      result: { runId: "run-abc", sessionId: "session-xyz", cdpUrl: null },
+      detectLatestSnapshotResult: "snap-should-not-use",
+      startRunCapture,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Fresh start",
+      repoIds: [],
+      autoRestore: false,
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const captures = cloudManager._getStartRunCaptures();
+    assert.equal(captures.length, 1, "startRun should be called once");
+    assert.equal(captures[0]?.restoreSnapshotId, null, "should not use snapshot");
+  });
+
+  await t.test("should prefer explicit restoreSnapshotId over autoRestore", async () => {
+    const wsManager = createMockWsManager();
+    const startRunCapture: Array<{ restoreSnapshotId: string | null }> = [];
+    const cloudManager = createMockCloudManager({
+      result: { runId: "run-abc", sessionId: "session-xyz", cdpUrl: null },
+      detectLatestSnapshotResult: "snap-auto-detected",
+      startRunCapture,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Restore specific",
+      repoIds: [],
+      restoreSnapshotId: "snap-explicit-999",
+      autoRestore: true,
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const captures = cloudManager._getStartRunCaptures();
+    assert.equal(captures.length, 1, "startRun should be called once");
+    assert.equal(captures[0]?.restoreSnapshotId, "snap-explicit-999", "should use explicit snapshot");
+  });
+
+  await t.test("should handle no snapshot found with autoRestore=true", async () => {
+    const wsManager = createMockWsManager();
+    const startRunCapture: Array<{ restoreSnapshotId: string | null }> = [];
+    const cloudManager = createMockCloudManager({
+      result: { runId: "run-abc", sessionId: "session-xyz", cdpUrl: null },
+      detectLatestSnapshotResult: null, // No snapshot found
+      startRunCapture,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Auto restore",
+      repoIds: [],
+      autoRestore: true,
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const captures = cloudManager._getStartRunCaptures();
+    assert.equal(captures.length, 1, "startRun should be called once");
+    assert.equal(captures[0]?.restoreSnapshotId, null, "should be null when no snapshot found");
+
+    // Should still start session successfully
+    const sentMessages = wsManager._getSentMessages();
+    const sessionStartedMsg = sentMessages.find((m) => m.message.type === "session_started");
+    assert.ok(sessionStartedMsg, "session_started message should be sent");
+  });
+
+  await t.test("should not call detectLatestSnapshot when autoRestore is undefined", async () => {
+    const wsManager = createMockWsManager();
+    const startRunCapture: Array<{ restoreSnapshotId: string | null }> = [];
+    const cloudManager = createMockCloudManager({
+      result: { runId: "run-abc", sessionId: "session-xyz", cdpUrl: null },
+      detectLatestSnapshotResult: "snap-should-not-use",
+      startRunCapture,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Normal run",
+      repoIds: [],
+      // autoRestore not specified (undefined)
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const captures = cloudManager._getStartRunCaptures();
+    assert.equal(captures.length, 1, "startRun should be called once");
+    assert.equal(captures[0]?.restoreSnapshotId, null, "should not use snapshot when autoRestore is undefined");
   });
 });
