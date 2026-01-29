@@ -68,14 +68,32 @@ message_queue_interval_ms = 3000
 rate_limit_msgs_per_sec = 1.0
 
 [slack]
-enabled = true                   # Set to false to disable Slack (default: true)
-bot_token = "<FILL ME SLACK BOT TOKEN>"
-signing_secret = "<FILL ME SLACK SINGING TOKEN>"
+client_id = "env:SLACK_CLIENT_ID"
+client_secret = "env:SLACK_CLIENT_SECRET"
+state_secret = "env:SLACK_STATE_SECRET"
+signing_secret = "env:SLACK_SIGNING_SECRET"
+# Bot scopes required by Tintin's current Slack API usage.
+scopes = [
+  "app_mentions:read",
+  "channels:history",
+  "chat:write",
+  "conversations.connect:read",
+  "conversations.connect:write",
+  "files:write",
+  "groups:history",
+  "im:history",
+  "im:read",
+  "im:write",
+  "reactions:write",
+  "users:read",
+]
+# Optional user scopes (leave empty unless you explicitly use user tokens).
+# user_scopes = []
 events_path = "/slack/events"
 interactions_path = "/slack/interactions"
-session_mode = "thread"
 max_chars = 3000
 rate_limit_msgs_per_sec = 1.0
+message_queue_interval_ms = 1000
 
 [cloud]
 enabled = false
@@ -208,7 +226,7 @@ sweep_minutes = 360
 # WebSocket is enabled by default even without this section
 [websocket]
 enabled = true                          # Default: true (enabled by default)
-auth_enabled = true   
+auth_enabled = true
 path = "/api/ws/chat"
 # auth_secret = "env:TINTIN_WS_AUTH_SECRET" # Required when auth_enabled = true
 ping_interval_ms = 30000                # Server ping interval

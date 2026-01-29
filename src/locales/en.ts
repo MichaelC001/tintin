@@ -40,8 +40,8 @@ export const en = {
   "menu.intro": "Choose a project to start a {agent} session.",
   "menu.sessions_hint_tg": "- /sessions - list recent sessions (add 'active' to filter, 'page 2' for older ones)",
   "menu.settings_hint_tg": "- /settings - list/tweak runtime settings (agent + MCP)",
-  "menu.sessions_hint_slack": "- Mention me with \"sessions\" to list recent sessions (add \"active\" or \"page 2\")",
-  "menu.settings_hint_slack": "- Mention me with \"settings\" to list/tweak runtime settings (agent + MCP)",
+  "menu.sessions_hint_slack": "- `sessions` - list recent sessions (add \"active\" or \"page 2\")",
+  "menu.settings_hint_slack": "- `settings` - list/tweak runtime settings (agent + MCP)",
   "menu.examples": "Examples:",
 
   // Actions
@@ -58,6 +58,7 @@ export const en = {
   // Errors
   "error.not_authorized": "Not authorized.",
   "error.generic": "Error: {message}",
+  "slack.thread_unsupported": "Thread replies are not supported. Please send commands in the main DM.",
   "error.path_required": "Path is required.",
   "error.path_not_directory": "Path must be an existing directory.",
   "error.path_not_allowed": "Path is not within allowed roots.",
@@ -123,6 +124,8 @@ export const en = {
   "run.no_active_repo_or_repos": "No active repo selected. Use {select} or {list}.",
   "run.diff_none": "No diff summary available.",
   "run.diff_summary": "Run {id} diff summary:\n{summary}\nPull locally with `{cmd}`.{view}",
+  "run.none_recent": "No recent runs.",
+  "run.list.title": "Recent runs:",
 
   "sandbox.stop_unavailable": "Sandbox stop not available.",
   "sandbox.stopping": "Stopping sandbox…",
@@ -193,7 +196,8 @@ export const en = {
   "cloud.help.note_group": "- In group chats, share repos with {cmd} first.",
   "cloud.help.note_disconnect": "- Use {cmd} to disconnect a GitHub App.",
   "cloud.help.note_lang": "- Use {cmd} to switch language for the current session.",
-  "cloud.help.note_slack_mention": "- In Slack channels, mention the bot to issue commands.",
+  "cloud.help.note_slack_dm": "- Use DM with the app; channel mentions are not supported.",
+  "cloud.help.note_slack_slash": "- Slack treats messages starting with '/' as slash commands; use plain text in DM.",
 
   "connect.dm_only": "Please run {cmd} in a direct message.",
   "connect.failed": "Connect failed: {error}",
@@ -252,6 +256,7 @@ export const en = {
   // Repos
   "repos.title": "Repositories:",
   "repos.select_hint": "Select with {cmd} (or {cmd2}).",
+  "repos.select_hint_targets": "Select with {cmd} or {cmd2}. Playground: {cmd3}.",
   "repos.playground_line": "0. {label}",
   "repo.playground_label": "Playground",
   "repo.active_set_playground": "Active repo set to {label}.",
@@ -259,6 +264,7 @@ export const en = {
   "repo.active_label": "Active repo: {label}.",
   "repo.active_detail": "Active repo: {name} ({id}).",
   "repo.active_not_found": "Active repo not found. Use {cmd}.",
+  "repo.none": "No repos found. Use {cmd} to connect.",
   "repo.none_active": "No active repo selected. Use {select} or {playground}.",
   "repo.none_active_simple": "No active repo selected.",
   "repo.not_found_use_repos": "Repo not found. Use {cmd} to list repos.",

@@ -40,8 +40,8 @@ export const zh = {
   "menu.intro": "选择一个项目来启动 {agent} 会话。",
   "menu.sessions_hint_tg": "- /sessions - 列出最近的会话（添加 'active' 过滤，'page 2' 查看更早的）",
   "menu.settings_hint_tg": "- /settings - 列出/调整运行时设置（agent + MCP）",
-  "menu.sessions_hint_slack": "- 提及我并说 \"sessions\" 来列出最近的会话（添加 \"active\" 或 \"page 2\"）",
-  "menu.settings_hint_slack": "- 提及我并说 \"settings\" 来列出/调整运行时设置（agent + MCP）",
+  "menu.sessions_hint_slack": "- `sessions` 列出最近会话（添加 \"active\" 或 \"page 2\"）",
+  "menu.settings_hint_slack": "- `settings` 列出/调整运行时设置（agent + MCP）",
   "menu.examples": "示例：",
 
   // Actions
@@ -58,6 +58,7 @@ export const zh = {
   // Errors
   "error.not_authorized": "未授权。",
   "error.generic": "错误：{message}",
+  "slack.thread_unsupported": "不支持在 Slack 线程中回复，请在主 DM 里发送命令。",
   "error.path_required": "路径是必需的。",
   "error.path_not_directory": "路径必须是一个存在的目录。",
   "error.path_not_allowed": "路径不在允许的根目录范围内。",
@@ -123,6 +124,8 @@ export const zh = {
   "run.no_active_repo_or_repos": "未选择活动仓库。请使用 {select} 或 {list}。",
   "run.diff_none": "暂无 diff 概要。",
   "run.diff_summary": "运行 {id} diff 概要：\n{summary}\n本地拉取：`{cmd}`。{view}",
+  "run.none_recent": "暂无最近运行记录。",
+  "run.list.title": "最近的运行：",
 
   "sandbox.stop_unavailable": "无法停止沙箱。",
   "sandbox.stopping": "正在停止沙箱…",
@@ -193,7 +196,8 @@ export const zh = {
   "cloud.help.note_group": "- 群聊中先用 {cmd} 共享仓库。",
   "cloud.help.note_disconnect": "- 使用 {cmd} 断开 GitHub App。",
   "cloud.help.note_lang": "- 使用 {cmd} 切换当前会话语言。",
-  "cloud.help.note_slack_mention": "- Slack 频道中需要 @ 机器人执行命令。",
+  "cloud.help.note_slack_dm": "- 只支持与应用 DM，频道 @ 不再支持。",
+  "cloud.help.note_slack_slash": "- Slack 中以 \"/\" 开头会被当作 Slash Command，请在 DM 中直接输入命令。",
 
   "connect.dm_only": "请在私聊中使用 {cmd}。",
   "connect.failed": "连接失败：{error}",
@@ -252,6 +256,7 @@ export const zh = {
   // Repos
   "repos.title": "仓库列表：",
   "repos.select_hint": "使用 {cmd} 选择（或 {cmd2}）。",
+  "repos.select_hint_targets": "使用 {cmd} 或 {cmd2} 选择。Playground：{cmd3}。",
   "repos.playground_line": "0. {label}",
   "repo.playground_label": "Playground",
   "repo.active_set_playground": "已将活动仓库设置为 {label}。",
@@ -259,6 +264,7 @@ export const zh = {
   "repo.active_label": "当前活动仓库：{label}。",
   "repo.active_detail": "当前活动仓库：{name}（{id}）。",
   "repo.active_not_found": "未找到活动仓库。请使用 {cmd}。",
+  "repo.none": "未发现仓库。请使用 {cmd} 连接。",
   "repo.none_active": "未选择活动仓库。请使用 {select} 或 {playground}。",
   "repo.none_active_simple": "未选择活动仓库。",
   "repo.not_found_use_repos": "未找到仓库。请使用 {cmd} 查看列表。",
