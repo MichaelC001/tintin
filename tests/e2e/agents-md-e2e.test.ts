@@ -1,4 +1,4 @@
-import { describe, it, before, after } from "node:test";
+import { describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert";
 import { existsSync } from "node:fs";
 import {
@@ -6,6 +6,8 @@ import {
   WebSocketClient,
   readRemoteAgentsMd,
   cleanupCloudRun,
+  getSandboxIdByRunId,
+  setUserLanguage,
   type E2EConfig,
 } from "../e2e/helpers.js";
 
@@ -33,6 +35,8 @@ describe("E2E: AGENTS.md Prompts", () => {
   let testIdentityId: string;
   let testRepoId: string;
   let identityId: string;
+  let platform: string;
+  let userId: string;
 
   before(async () => {
     const fixtures = await getTestFixtures(CONFIG_PATH);
@@ -54,6 +58,22 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     assert.ok(authOk, "Should receive auth_ok message");
     identityId = authOk.identityId || testIdentityId;
+    // For WebSocket platform, platform="websocket" and userId=identityId
+    platform = "websocket";
+    userId = identityId;
+
+    // Wait for sandbox_ready to ensure workspace is provisioned
+    // The server auto-provisions a workspace for WebSocket connections
+    const sandboxReady = await ws.waitForMessage(
+      (msg: any) => msg.type === "sandbox_ready",
+      30000
+    );
+    assert.ok(sandboxReady, "Should receive sandbox_ready message");
+  });
+
+  // Reset language to English before each test
+  beforeEach(async () => {
+    await setUserLanguage(CONFIG_PATH, platform, userId, "en");
   });
 
   after(async () => {
@@ -77,7 +97,6 @@ describe("E2E: AGENTS.md Prompts", () => {
       type: "cloud_run",
       repoIds: [], // Empty list for minimal setup
       prompt: "Hello",
-      language: "en",
     });
 
     // Wait for session_started
@@ -87,11 +106,16 @@ describe("E2E: AGENTS.md Prompts", () => {
     );
 
     assert.ok(started, "Should receive session_started message");
-    sessionId = started.session_id ?? null;
-    sandboxId = started.sandbox_id ?? null;
+    // Note: fields are camelCase in the message
+    sessionId = started.sessionId ?? null;
+    const runId = started.runId ?? null;
 
-    assert.ok(sessionId, "Should have session_id");
-    assert.ok(sandboxId, "Should have sandbox_id");
+    assert.ok(sessionId, "Should have sessionId");
+    assert.ok(runId, "Should have runId");
+
+    // Get sandbox_id (workspace_id) from database using runId
+    sandboxId = await getSandboxIdByRunId(CONFIG_PATH, runId);
+    assert.ok(sandboxId, "Should have sandbox_id from database");
 
     // Read AGENTS.md from remote
     const agentsMd = await readRemoteAgentsMd(sandboxId, config.modalTokenId, config.modalTokenSecret);
@@ -109,11 +133,13 @@ describe("E2E: AGENTS.md Prompts", () => {
     sessionId = null;
     sandboxId = null;
 
+    // Set language to Chinese in database
+    await setUserLanguage(CONFIG_PATH, platform, userId, "zh");
+
     ws.send({
       type: "cloud_run",
       repoIds: [],
       prompt: "Hello",
-      language: "zh",
     });
 
     const started = await ws.waitForMessage(
@@ -122,11 +148,14 @@ describe("E2E: AGENTS.md Prompts", () => {
     );
 
     assert.ok(started, "Should receive session_started message");
-    sessionId = started.session_id ?? null;
-    sandboxId = started.sandbox_id ?? null;
+    sessionId = started.sessionId ?? null;
+    const runId = started.runId ?? null;
 
-    assert.ok(sessionId, "Should have session_id");
-    assert.ok(sandboxId, "Should have sandbox_id");
+    assert.ok(sessionId, "Should have sessionId");
+    assert.ok(runId, "Should have runId");
+
+    sandboxId = await getSandboxIdByRunId(CONFIG_PATH, runId);
+    assert.ok(sandboxId, "Should have sandbox_id from database");
 
     const agentsMd = await readRemoteAgentsMd(sandboxId, config.modalTokenId, config.modalTokenSecret);
 
@@ -146,7 +175,6 @@ describe("E2E: AGENTS.md Prompts", () => {
       type: "cloud_run",
       repoIds: [],
       prompt: "Hello",
-      language: "en",
     });
 
     const started = await ws.waitForMessage(
@@ -155,11 +183,14 @@ describe("E2E: AGENTS.md Prompts", () => {
     );
 
     assert.ok(started, "Should receive session_started message");
-    sessionId = started.session_id ?? null;
-    sandboxId = started.sandbox_id ?? null;
+    sessionId = started.sessionId ?? null;
+    const runId = started.runId ?? null;
 
-    assert.ok(sessionId, "Should have session_id");
-    assert.ok(sandboxId, "Should have sandbox_id");
+    assert.ok(sessionId, "Should have sessionId");
+    assert.ok(runId, "Should have runId");
+
+    sandboxId = await getSandboxIdByRunId(CONFIG_PATH, runId);
+    assert.ok(sandboxId, "Should have sandbox_id from database");
 
     const agentsMd = await readRemoteAgentsMd(sandboxId, config.modalTokenId, config.modalTokenSecret);
 

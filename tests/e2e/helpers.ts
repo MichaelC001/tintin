@@ -4,8 +4,10 @@ import { createProxyToken } from "../../src/runtime/cloud/proxy.js";
 import { Kysely, SqliteDialect } from "kysely";
 import Database from "better-sqlite3";
 import type { DatabaseSchema } from "../../src/runtime/db.js";
+import type { UserLanguage } from "../../src/locales/index.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 // Helper to parse SQLAlchemy-style SQLite URLs
 function parseSqliteFilePath(sqliteUrl: string, baseDir: string): string {
@@ -321,4 +323,77 @@ export async function readLocalAgentsMd(): Promise<string> {
 export async function readLocalPromptsFile(name: string): Promise<string> {
   const promptsPath = path.resolve(process.cwd(), "prompts", name);
   return await readFile(promptsPath, "utf-8");
+}
+
+export async function getSandboxIdByRunId(configPath: string, runId: string): Promise<string | null> {
+  const config = await loadE2EConfig(configPath);
+
+  // Initialize DB connection - parse the SQLite URL
+  const dbPath = parseSqliteFilePath(config.dbUrl, config.configDir);
+  const db = new Kysely<DatabaseSchema>({
+    dialect: new SqliteDialect({
+      database: new Database(dbPath),
+    }),
+  });
+
+  try {
+    const runRow = await db
+      .selectFrom("cloud_runs")
+      .select("workspace_id")
+      .where("id", "=", runId)
+      .executeTakeFirst();
+
+    return runRow?.workspace_id ?? null;
+  } finally {
+    await db.destroy();
+  }
+}
+
+/**
+ * Set the user language preference in the database.
+ * This is used to control which locale directive is included in AGENTS.md.
+ */
+export async function setUserLanguage(configPath: string, platform: string, userId: string, language: UserLanguage): Promise<void> {
+  const config = await loadE2EConfig(configPath);
+
+  // Initialize DB connection - parse the SQLite URL
+  const dbPath = parseSqliteFilePath(config.dbUrl, config.configDir);
+  const db = new Kysely<DatabaseSchema>({
+    dialect: new SqliteDialect({
+      database: new Database(dbPath),
+    }),
+  });
+
+  try {
+    const existing = await db
+      .selectFrom("user_preferences")
+      .select("id")
+      .where("platform", "=", platform)
+      .where("user_id", "=", userId)
+      .executeTakeFirst();
+
+    const now = Math.floor(Date.now() / 1000);
+
+    if (existing) {
+      await db
+        .updateTable("user_preferences")
+        .set({ language, updated_at: now })
+        .where("id", "=", existing.id)
+        .execute();
+    } else {
+      await db
+        .insertInto("user_preferences")
+        .values({
+          id: randomUUID(),
+          platform,
+          user_id: userId,
+          language,
+          created_at: now,
+          updated_at: now,
+        })
+        .execute();
+    }
+  } finally {
+    await db.destroy();
+  }
 }
