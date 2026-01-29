@@ -3,25 +3,29 @@ import assert from "node:assert";
 import { buildLocalizedPrompt } from "../../src/runtime/prompt.js";
 
 describe("buildLocalizedPrompt", () => {
-  it("should include search directive when provided", () => {
+  it("should return the base prompt unchanged", () => {
+    const result = buildLocalizedPrompt("base prompt", "en");
+
+    assert.strictEqual(result, "base prompt");
+  });
+
+  it("should ignore search directive (now in AGENTS.md)", () => {
     const result = buildLocalizedPrompt("base prompt", "en", {
       searchDirective: "Search for things",
     });
 
-    assert.ok(result.includes("Search for things"));
-    assert.ok(result.includes("base prompt"));
+    assert.strictEqual(result, "base prompt");
   });
 
-  it("should work without search directive", () => {
-    const result = buildLocalizedPrompt("base prompt", "en");
-
-    assert.ok(result.includes("base prompt"));
-  });
-
-  it("should include language directive", () => {
+  it("should ignore language parameter (now in AGENTS.md)", () => {
     const result = buildLocalizedPrompt("base prompt", "zh");
 
-    assert.ok(result.includes("你必须用中文回答"));
-    assert.ok(result.includes("base prompt"));
+    assert.strictEqual(result, "base prompt");
+  });
+
+  it("should handle empty string", () => {
+    const result = buildLocalizedPrompt("", "en");
+
+    assert.strictEqual(result, "");
   });
 });
