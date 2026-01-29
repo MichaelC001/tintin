@@ -1,0 +1,303 @@
+import { ModalClient, type Sandbox } from "modal";
+import { loadConfig, type AppConfig } from "../../src/runtime/config.js";
+import { createProxyToken } from "../../src/runtime/cloud/proxy.js";
+import { Kysely, SqliteDialect } from "kysely";
+import Database from "better-sqlite3";
+import type { DatabaseSchema } from "../../src/runtime/db.js";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+// Type for ws library WebSocket (Node.js, not browser)
+// Import the type from the ws package
+import type { WebSocket as WebSocketWs } from "ws";
+
+export interface E2EConfig {
+  wsUrl: string;
+  modalTokenId: string;
+  modalTokenSecret: string;
+  modalEnvironment?: string;
+  modalEndpoint?: string;
+  requestTimeoutMs: number;
+  proxySecret: string;
+  dataDir: string;
+}
+
+export interface E2EFixtures {
+  config: E2EConfig;
+  testIdentityId: string;
+  testRepoId: string;
+}
+
+const E2E_TIMEOUTS = {
+  wsConnect: 5000,
+  authResponse: 3000,
+  sessionStarted: 60000,
+  fileRead: 10000,
+  cleanup: 30000,
+};
+
+export async function loadE2EConfig(configPath: string): Promise<E2EConfig> {
+  const config = await loadConfig(configPath);
+
+  const wsPort = config.bot.port;
+  const wsPath = config.websocket?.path ?? "/api/ws/chat";
+  const wsBaseUrl = config.cloud?.public_base_url
+    ? new URL(config.cloud.public_base_url).origin
+    : `ws://localhost:${wsPort}`;
+  const wsUrl = `${wsBaseUrl}${wsPath}`;
+
+  const cloud = config.cloud;
+  if (!cloud?.enabled) {
+    throw new Error("Cloud mode must be enabled for E2E tests");
+  }
+  if (!cloud.modal?.token_id || !cloud.modal?.token_secret) {
+    throw new Error("Modal token_id and token_secret must be configured");
+  }
+  if (!cloud.proxy?.shared_secret) {
+    throw new Error("Proxy shared_secret must be configured for auth tokens");
+  }
+
+  return {
+    wsUrl,
+    modalTokenId: cloud.modal.token_id,
+    modalTokenSecret: cloud.modal.token_secret,
+    modalEnvironment: cloud.modal.environment || undefined,
+    modalEndpoint: cloud.modal.endpoint || undefined,
+    requestTimeoutMs: cloud.modal.request_timeout_ms || 300_000,
+    proxySecret: cloud.proxy.shared_secret,
+    dataDir: config.bot.data_dir,
+  };
+}
+
+export class WebSocketClient {
+  private ws: WebSocketWs | null = null;
+  private messageBuffer: any[] = [];
+  private pendingWaits: Array<{
+    predicate: (msg: any) => boolean;
+    resolve: (value: any) => void;
+    reject: (reason: any) => void;
+    timeoutMs: number;
+  }> = [];
+
+  constructor(private url: string) {}
+
+  async connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      // Import ws dynamically since it's a CJS module
+      let WebSocketClient: any;
+      try {
+        WebSocketClient = require("ws");
+      } catch {
+        reject(new Error("ws module not available. Install with: npm install ws"));
+        return;
+      }
+
+      this.ws = new WebSocketClient(this.url);
+
+      if (!this.ws) {
+        reject(new Error("Failed to create WebSocket"));
+        return;
+      }
+
+      this.ws.on("open", () => {
+        resolve();
+      });
+
+      this.ws.on("error", (err: Error) => {
+        reject(new Error(`WebSocket error: ${err.message}`));
+      });
+
+      this.ws.on("message", (data: Buffer) => {
+        try {
+          const msg = JSON.parse(data.toString());
+
+          // Add to buffer
+          this.messageBuffer.push(msg);
+
+          // Check pending waits
+          for (let i = this.pendingWaits.length - 1; i >= 0; i--) {
+            const pending = this.pendingWaits[i];
+            if (pending && pending.predicate(msg)) {
+              this.pendingWaits.splice(i, 1);
+              pending.resolve(msg);
+              return;
+            }
+          }
+        } catch (e) {
+          console.error("[ws] Failed to parse message:", e);
+        }
+      });
+
+      setTimeout(() => reject(new Error("WebSocket connect timeout")), E2E_TIMEOUTS.wsConnect);
+    });
+  }
+
+  send(data: object): void {
+    if (!this.ws) throw new Error("WebSocket not connected");
+    this.ws.send(JSON.stringify(data));
+  }
+
+  async waitForMessage(predicate: (msg: any) => boolean, timeoutMs = 5000): Promise<any> {
+    // Check buffer first
+    for (const msg of this.messageBuffer) {
+      if (predicate(msg)) {
+        // Remove matched message from buffer
+        const idx = this.messageBuffer.indexOf(msg);
+        if (idx >= 0) this.messageBuffer.splice(idx, 1);
+        return msg;
+      }
+    }
+
+    // Wait for new message
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const idx = this.pendingWaits.findIndex((w) => w.predicate === predicate);
+        if (idx >= 0) {
+          this.pendingWaits.splice(idx, 1);
+        }
+        reject(new Error(`Timeout waiting for message (timeout=${timeoutMs}ms)`));
+      }, timeoutMs);
+
+      this.pendingWaits.push({
+        predicate,
+        resolve: (msg: any) => {
+          clearTimeout(timeout);
+          resolve(msg);
+        },
+        reject: (reason: any) => {
+          clearTimeout(timeout);
+          reject(reason);
+        },
+        timeoutMs,
+      });
+    });
+  }
+
+  close(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+  }
+}
+
+export async function getSandboxById(client: ModalClient, sandboxId: string): Promise<Sandbox> {
+  // Use the same pattern as ModalCloudProvider.getOrFetchSandbox
+  const fromId = (client as any).sandboxes?.fromId;
+  if (typeof fromId !== "function") {
+    throw new Error("Modal client does not support sandboxes.fromId");
+  }
+  return await fromId.call(client.sandboxes, sandboxId);
+}
+
+export async function readRemoteAgentsMd(sandboxId: string, tokenId: string, tokenSecret: string): Promise<string> {
+  const client = new ModalClient({
+    tokenId: process.env.MODAL_TOKEN_ID || tokenId,
+    tokenSecret: process.env.MODAL_TOKEN_SECRET || tokenSecret,
+  });
+
+  const sandbox = await getSandboxById(client, sandboxId);
+
+  const proc = await sandbox.exec(["/bin/sh", "-lc", "cat /home/ubuntu/.codex/AGENTS.md"], {
+    workdir: "/",
+    mode: "text",
+  });
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    proc.stdout.readText(),
+    proc.stderr.readText(),
+    proc.wait(),
+  ]);
+
+  if (exitCode !== 0) {
+    throw new Error(`Failed to read AGENTS.md (exit ${exitCode}): ${stderr}`);
+  }
+
+  return stdout;
+}
+
+export async function cleanupCloudRun(sessionId: string, sandboxId: string, tokenId: string, tokenSecret: string): Promise<void> {
+  const client = new ModalClient({
+    tokenId: process.env.MODAL_TOKEN_ID || tokenId,
+    tokenSecret: process.env.MODAL_TOKEN_SECRET || tokenSecret,
+  });
+
+  const sandbox = await getSandboxById(client, sandboxId);
+
+  // Kill the agent process (SIGTERM to process group)
+  try {
+    await sandbox.exec(["/bin/sh", "-lc", "pkill -TERM -P 1 || true"], {
+      workdir: "/",
+      mode: "text",
+    });
+    await sleep(1000);
+  } catch {
+    // Ignore cleanup errors
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function getTestFixtures(configPath: string): Promise<E2EFixtures> {
+  const config = await loadE2EConfig(configPath);
+
+  // Initialize DB connection
+  const dbPath = path.join(config.dataDir, "tintin.db");
+  const db = new Kysely<DatabaseSchema>({
+    dialect: new SqliteDialect({
+      database: new Database(dbPath),
+    }),
+  });
+
+  try {
+    // Find first GitHub identity
+    const identityRow = await db
+      .selectFrom("identities")
+      .select("id")
+      .where("platform", "=", "github")
+      .limit(1)
+      .executeTakeFirst();
+
+    if (!identityRow) {
+      throw new Error("No GitHub identity found. Run tests with at least one GitHub identity configured.");
+    }
+
+    // Find first repo
+    const repoRow = await db
+      .selectFrom("repos")
+      .select("id")
+      .limit(1)
+      .executeTakeFirst();
+
+    const testRepoId = repoRow?.id ?? "";
+
+    return {
+      config,
+      testIdentityId: identityRow.id,
+      testRepoId,
+    };
+  } finally {
+    await db.destroy();
+  }
+}
+
+export async function createTestAuthToken(config: E2EConfig, identityId: string): Promise<string> {
+  // Use the same token creation as cloud proxy
+  return createProxyToken(
+    config.proxySecret,
+    identityId,
+    24 * 60 * 60 * 1000 // 24 hours
+  );
+}
+
+export async function readLocalAgentsMd(): Promise<string> {
+  const agentsMdPath = path.resolve(process.cwd(), "AGENTS.md");
+  return await readFile(agentsMdPath, "utf-8");
+}
+
+export async function readLocalPromptsFile(name: string): Promise<string> {
+  const promptsPath = path.resolve(process.cwd(), "prompts", name);
+  return await readFile(promptsPath, "utf-8");
+}
