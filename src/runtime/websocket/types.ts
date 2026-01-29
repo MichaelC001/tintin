@@ -76,6 +76,12 @@ export interface SubscribeRunMessage {
   runId: string;
 }
 
+export interface CloudFollowUpMessage {
+  type: 'cloud_follow_up';
+  runId: string;
+  prompt: string;
+}
+
 export type ClientMessage =
   | AuthMessage
   | ChatMessage
@@ -88,7 +94,8 @@ export type ClientMessage =
   | GetAuthStatusMessage
   | StartOAuthMessage
   | CloudRunMessage
-  | SubscribeRunMessage;
+  | SubscribeRunMessage
+  | CloudFollowUpMessage;
 
 // ============ Server → Client Messages ============
 
@@ -245,6 +252,20 @@ export interface BrowserSessionMessage {
   provider: BrowserProvider;
 }
 
+export interface FollowUpQueuedMessage {
+  type: 'follow_up_queued';
+  runId: string;
+  sessionId: string;
+  position: number;
+}
+
+export interface FollowUpResumingMessage {
+  type: 'follow_up_resuming';
+  runId: string;
+  sessionId: string;
+  status: 'resuming' | 'restarting';
+}
+
 export type ServerMessage =
   | AuthOkMessage
   | AuthErrorMessage
@@ -266,7 +287,9 @@ export type ServerMessage =
   | BrowserSessionMessage
   | SandboxStatusMessage
   | SandboxReadyMessage
-  | SandboxErrorMessage;
+  | SandboxErrorMessage
+  | FollowUpQueuedMessage
+  | FollowUpResumingMessage;
 
 // ============ Error Codes ============
 
@@ -278,6 +301,7 @@ export const ErrorCodes = {
   RATE_LIMIT: 'RATE_LIMIT',
   INVALID_MESSAGE: 'INVALID_MESSAGE',
   SERVICE_ERROR: 'SERVICE_ERROR',
+  RUN_NOT_RESUMABLE: 'RUN_NOT_RESUMABLE',
 } as const;
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];

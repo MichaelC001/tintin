@@ -16,6 +16,10 @@ export class WebSocketHandler {
   private readonly cloudRunService: CloudRunService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
+  get cloudService(): CloudRunService | null {
+    return this.cloudRunService;
+  }
+
   constructor(
     private readonly wsManager: WebSocketManager,
     private readonly sessionManager: SessionManager,
@@ -157,6 +161,21 @@ export class WebSocketHandler {
           return;
         }
         await this.cloudRunService.handleSubscribeRun(connId, message.runId);
+        break;
+      }
+
+      case 'cloud_follow_up': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        await this.cloudRunService.handleCloudFollowUp(connId, auth.conn, message);
         break;
       }
 

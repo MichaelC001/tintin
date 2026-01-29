@@ -1480,6 +1480,15 @@ export async function createBotService(deps: BotServiceDeps) {
       if (wsMessage) {
         wsManager.broadcastToSession(sessionId, wsMessage);
       }
+
+      // On session completion, mark sandbox ready and process follow-up queue
+      const isDone = message.type === "finalize" || (message.type !== "plan_update" && message.type !== "image" && 'final' in message && message.final);
+      if (isDone && session.platform === "websocket" && wsHandler?.sandboxLifecycleService) {
+        const connId = wsManager.findConnectionBySandboxSession(sessionId);
+        if (connId) {
+          wsHandler.sandboxLifecycleService.markReadyAndNotify(connId);
+        }
+      }
     }
 
     // Skip platform delivery for WebSocket-only sessions
@@ -1693,8 +1702,18 @@ export async function createBotService(deps: BotServiceDeps) {
     if (cloudManager && wsHandler.sandboxLifecycleService) {
       const sandboxService = wsHandler.sandboxLifecycleService;
       wsManager.setDisconnectHandler(async (connId, conn) => {
+        // Clean up follow-up queue entries for disconnected connection
+        wsHandler!.cloudService?.cleanupConnection(connId);
         await sandboxService.terminateSandbox(connId, conn);
       });
+
+      // Wire sandbox completion to follow-up queue processing
+      const cloudService = wsHandler.cloudService;
+      if (cloudService) {
+        sandboxService.setOnSessionComplete((sessionId) => {
+          void cloudService.processQueuedFollowUps(sessionId);
+        });
+      }
     }
 
     wsManager.startHeartbeat();

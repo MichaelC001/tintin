@@ -3,13 +3,22 @@ import type { Db } from '../../db.js';
 import type { AppConfig } from '../../config.js';
 import type { CloudManager } from '../../cloud/manager.js';
 import type { WebSocketManager } from '../manager.js';
-import type { CloudRunMessage, WSConnection } from '../types.js';
+import type { CloudRunMessage, CloudFollowUpMessage, WSConnection } from '../types.js';
 import { ErrorCodes } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { CloudLinkBuilder } from './linkBuilder.js';
 import type { SandboxLifecycleService } from './sandboxLifecycle.js';
 import { listReposForIdentity, getCloudRun } from '../../cloud/store.js';
 import { mapDbStatusToWsStatus } from '../../cloud/types.js';
+import type { SessionRow } from '../../store.js';
+
+interface FollowUpEntry {
+  connId: string;
+  prompt: string;
+  runId: string;
+}
+
+const MAX_QUEUE_SIZE = 50;
 
 /**
  * CloudRunService - Handles WebSocket cloud run requests.
@@ -19,6 +28,8 @@ import { mapDbStatusToWsStatus } from '../../cloud/types.js';
 export class CloudRunService {
   private readonly identityResolver: IdentityResolver;
   private readonly linkBuilder: CloudLinkBuilder;
+  /** In-memory follow-up queues keyed by sessionId */
+  private readonly followUpQueues = new Map<string, FollowUpEntry[]>();
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -250,25 +261,10 @@ export class CloudRunService {
 
   async handleSubscribeRun(connId: string, runId: string): Promise<void> {
     try {
-      const run = await getCloudRun(this.db, runId);
-      if (!run) {
-        this.wsManager.sendToConnection(connId, {
-          type: 'error',
-          code: ErrorCodes.SESSION_NOT_FOUND,
-          message: 'Run not found',
-        });
-        return;
-      }
+      const validated = await this.validateRun(connId, runId);
+      if (!validated) return;
 
-      const sessionId = run.session_id;
-      if (!sessionId) {
-        this.wsManager.sendToConnection(connId, {
-          type: 'error',
-          code: ErrorCodes.SESSION_NOT_FOUND,
-          message: 'Run has no associated session',
-        });
-        return;
-      }
+      const { run, sessionId } = validated;
 
       // Subscribe to the session
       this.wsManager.subscribeToSession(connId, sessionId);
@@ -303,6 +299,289 @@ export class CloudRunService {
         message: `Failed to subscribe to run: ${String(err)}`,
       });
     }
+  }
+
+  /**
+   * Handle a follow-up prompt on an existing cloud run.
+   * If the session is still running, the prompt is queued.
+   * If the session is finished/error, it resumes or restarts the sandbox.
+   */
+  async handleCloudFollowUp(
+    connId: string,
+    conn: WSConnection,
+    message: CloudFollowUpMessage,
+  ): Promise<void> {
+    const { runId } = message;
+    const prompt = message.prompt?.trim();
+
+    if (!runId) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.INVALID_MESSAGE,
+        message: 'Run ID required',
+      });
+      return;
+    }
+
+    if (!prompt) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.INVALID_MESSAGE,
+        message: 'Prompt is required',
+      });
+      return;
+    }
+
+    try {
+      // Validate the run exists and has a session
+      const validated = await this.validateRun(connId, runId);
+      if (!validated) return;
+
+      const { run, sessionId } = validated;
+
+      // Validate ownership
+      const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
+      if (run.identity_id !== dbIdentityId) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.ACCESS_DENIED,
+          message: 'You do not have access to this run',
+        });
+        return;
+      }
+
+      // Get session to check status
+      const session = await this.db
+        .selectFrom('sessions')
+        .selectAll()
+        .where('id', '=', sessionId)
+        .executeTakeFirst();
+
+      if (!session) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SESSION_NOT_FOUND,
+          message: 'Session not found',
+        });
+        return;
+      }
+
+      // Check if session was killed - cannot resume
+      if (session.status === 'killed') {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.RUN_NOT_RESUMABLE,
+          message: 'Run was killed and cannot be resumed',
+        });
+        return;
+      }
+
+      // If session is still active, queue the follow-up
+      if (session.status === 'running' || session.status === 'starting') {
+        const position = this.enqueueFollowUp(sessionId, { connId, prompt, runId });
+        if (position < 0) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.RATE_LIMIT,
+            message: 'Follow-up queue is full',
+          });
+          return;
+        }
+
+        // Subscribe to session so client receives updates
+        this.wsManager.subscribeToSession(connId, sessionId);
+
+        this.wsManager.sendToConnection(connId, {
+          type: 'follow_up_queued',
+          runId,
+          sessionId,
+          position,
+        });
+
+        this.logger.info(
+          `[ws][cloud] follow-up queued connId=${connId} runId=${runId} sessionId=${sessionId} position=${position}`,
+        );
+        return;
+      }
+
+      // Session is finished or errored - attempt resume/restart
+      await this.resumeFollowUp(connId, runId, sessionId, session as SessionRow, prompt);
+    } catch (err) {
+      this.logger.error(`[ws][cloud] handleCloudFollowUp error connId=${connId}: ${String(err)}`);
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SERVICE_ERROR,
+        message: `Failed to process follow-up: ${String(err)}`,
+      });
+    }
+  }
+
+  /**
+   * Process queued follow-up prompts after a session completes.
+   * Called by the sandbox lifecycle / session completion hook.
+   */
+  async processQueuedFollowUps(sessionId: string): Promise<void> {
+    const queue = this.followUpQueues.get(sessionId);
+    if (!queue || queue.length === 0) {
+      this.followUpQueues.delete(sessionId);
+      return;
+    }
+
+    // Take next entry
+    const entry = queue.shift()!;
+    if (queue.length === 0) {
+      this.followUpQueues.delete(sessionId);
+    }
+
+    // Check if the connection is still alive
+    const conn = this.wsManager.getConnection(entry.connId);
+    if (!conn) {
+      this.logger.debug(
+        `[ws][cloud] follow-up skipped: connection closed connId=${entry.connId} sessionId=${sessionId}`,
+      );
+      // Try next entry
+      await this.processQueuedFollowUps(sessionId);
+      return;
+    }
+
+    const session = await this.db
+      .selectFrom('sessions')
+      .selectAll()
+      .where('id', '=', sessionId)
+      .executeTakeFirst();
+
+    if (!session) {
+      this.logger.warn(`[ws][cloud] follow-up skipped: session not found sessionId=${sessionId}`);
+      return;
+    }
+
+    try {
+      await this.resumeFollowUp(entry.connId, entry.runId, sessionId, session as SessionRow, entry.prompt);
+    } catch (err) {
+      this.logger.error(
+        `[ws][cloud] processQueuedFollowUps error sessionId=${sessionId}: ${String(err)}`,
+      );
+      this.wsManager.sendToConnection(entry.connId, {
+        type: 'error',
+        code: ErrorCodes.SERVICE_ERROR,
+        message: `Failed to process queued follow-up: ${String(err)}`,
+      });
+      // Continue processing queue even on error
+      await this.processQueuedFollowUps(sessionId);
+    }
+  }
+
+  /**
+   * Clean up follow-up queue entries for a disconnected connection.
+   */
+  cleanupConnection(connId: string): void {
+    for (const [sessionId, queue] of this.followUpQueues.entries()) {
+      const filtered = queue.filter((e) => e.connId !== connId);
+      if (filtered.length === 0) {
+        this.followUpQueues.delete(sessionId);
+      } else {
+        this.followUpQueues.set(sessionId, filtered);
+      }
+    }
+  }
+
+  private enqueueFollowUp(sessionId: string, entry: FollowUpEntry): number {
+    let queue = this.followUpQueues.get(sessionId);
+    if (!queue) {
+      queue = [];
+      this.followUpQueues.set(sessionId, queue);
+    }
+    if (queue.length >= MAX_QUEUE_SIZE) {
+      return -1;
+    }
+    queue.push(entry);
+    return queue.length;
+  }
+
+  private async resumeFollowUp(
+    connId: string,
+    runId: string,
+    sessionId: string,
+    session: SessionRow,
+    prompt: string,
+  ): Promise<void> {
+    // Subscribe to session so client receives updates
+    this.wsManager.subscribeToSession(connId, sessionId);
+
+    // Try resume (sandbox still alive)
+    const resumed = await this.cloudManager.resumeCloudSession(session, prompt);
+    if (resumed === 'resumed') {
+      this.wsManager.sendToConnection(connId, {
+        type: 'follow_up_resuming',
+        runId,
+        sessionId,
+        status: 'resuming',
+      });
+
+      // Mark sandbox as in use if we have sandbox service
+      if (this.sandboxService) {
+        this.sandboxService.markInUse(connId, runId, sessionId);
+      }
+
+      this.logger.info(
+        `[ws][cloud] follow-up resumed connId=${connId} runId=${runId} sessionId=${sessionId}`,
+      );
+      return;
+    }
+
+    if (resumed === 'expired') {
+      // Sandbox expired, need to restart
+      this.wsManager.sendToConnection(connId, {
+        type: 'follow_up_resuming',
+        runId,
+        sessionId,
+        status: 'restarting',
+      });
+
+      const restarted = await this.cloudManager.restartCloudSession(session, prompt);
+      if (restarted === 'restarted') {
+        this.logger.info(
+          `[ws][cloud] follow-up restarted connId=${connId} runId=${runId} sessionId=${sessionId}`,
+        );
+        return;
+      }
+    }
+
+    // If resume and restart both failed
+    this.wsManager.sendToConnection(connId, {
+      type: 'error',
+      code: ErrorCodes.SERVICE_ERROR,
+      message: 'Failed to resume or restart session',
+    });
+  }
+
+  /**
+   * Validate that a run exists and has an associated session.
+   * Sends error messages to the client if validation fails.
+   * Returns the run and sessionId on success, or null on failure.
+   */
+  private async validateRun(connId: string, runId: string) {
+    const run = await getCloudRun(this.db, runId);
+    if (!run) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SESSION_NOT_FOUND,
+        message: 'Run not found',
+      });
+      return null;
+    }
+
+    const sessionId = run.session_id;
+    if (!sessionId) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SESSION_NOT_FOUND,
+        message: 'Run has no associated session',
+      });
+      return null;
+    }
+
+    return { run, sessionId };
   }
 
   /**
