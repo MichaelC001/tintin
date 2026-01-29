@@ -233,8 +233,8 @@ export interface RunLinksMessage {
   runId: string;
   sessionId: string;
   viewUrl?: string;
-  codeProxyUrl?: string;
-  vscodeUrl?: string;
+  vscodeUrl?: string;          // VS Code desktop URI scheme
+  codeServerUrl?: string;      // Modal tunnel URL (direct access to web code-server)
 }
 
 export interface BrowserSessionMessage {

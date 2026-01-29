@@ -60,18 +60,6 @@ RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
   && rm -rf /root/.cache /tmp/* /var/tmp/*
 
-# Install vsda stub for VS Code remote agent compatibility
-# VS Code's signService requests vsda WASM module but code-server doesn't include it.
-# This stub satisfies the module loader without providing real cryptographic signing.
-COPY vsda-stub/vsda.js /tmp/vsda.js
-COPY vsda-stub/vsda_bg.wasm /tmp/vsda_bg.wasm
-RUN mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web \
-  && mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/dist \
-  && cp /tmp/vsda.js /usr/lib/code-server/lib/vscode/node_modules/vsda/dist/vsda.js \
-  && cp /tmp/vsda_bg.wasm /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web/vsda_bg.wasm \
-  && cp /tmp/vsda.js /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web/vsda.js \
-  && rm -f /tmp/vsda.js /tmp/vsda_bg.wasm
-
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
 COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js
 COPY tintin-helper-lib.js /usr/local/bin/tintin-helper-lib.js

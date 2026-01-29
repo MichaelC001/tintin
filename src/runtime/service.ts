@@ -69,7 +69,6 @@ import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";
-import { CodeProxyHandler } from "./codeProxy.js";
 
 export interface BotServiceDeps {
   config: AppConfig;
@@ -1572,7 +1571,6 @@ export async function createBotService(deps: BotServiceDeps) {
   streamer.start();
 
   const cloudManager = config.cloud?.enabled ? new CloudManager(config, db, logger, null) : null;
-  const codeProxy = cloudManager ? new CodeProxyHandler(cloudManager, logger) : null;
   const sessionManager = new SessionManager(
     config,
     db,
@@ -1799,16 +1797,6 @@ export async function createBotService(deps: BotServiceDeps) {
         const token = createProxyToken(proxy.shared_secret, identityId, ttlMs);
 
         sendJson(res, 200, { token, identityId, expiresIn: ttlMs });
-        return;
-      }
-
-      // Code proxy route: /api/code-proxy/:sessionId/*
-      // Proxies requests to code-server in Modal sandbox, stripping X-Frame-Options
-      const codeProxyMatch = pathname.match(/^\/api\/code-proxy\/([^/]+)(\/.*)?$/);
-      if (codeProxyMatch && codeProxy && codeProxyMatch[1]) {
-        const sessionId = codeProxyMatch[1];
-        const pathSuffix = codeProxyMatch[2] || '/';
-        await codeProxy.handleRequest(sessionId, req, res, pathSuffix);
         return;
       }
 
@@ -3125,18 +3113,6 @@ export async function createBotService(deps: BotServiceDeps) {
     server.on('upgrade', (req, socket, head) => {
       const reqUrl = req.url ?? '';
       const pathOnly = reqUrl.split('?')[0] ?? '';
-
-      // Handle code-proxy WebSocket upgrade
-      const codeProxyMatch = pathOnly.match(/^\/api\/code-proxy\/([^/]+)(\/.*)?$/);
-      if (codeProxyMatch && codeProxy && codeProxyMatch[1]) {
-        const sessionId = codeProxyMatch[1];
-        const pathSuffix = codeProxyMatch[2] || '/';
-        codeProxy.handleUpgrade(sessionId, req, socket, head, pathSuffix).catch((err) => {
-          logger.warn(`[code-proxy] ws upgrade error: ${String(err)}`);
-          socket.destroy();
-        });
-        return;
-      }
 
       // Handle regular WebSocket upgrade
       if (pathOnly === config.websocket!.path) {

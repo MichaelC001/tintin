@@ -215,15 +215,13 @@ export class CloudRunService {
         });
       }
 
-      // Send run links (viewUrl and codeProxyUrl immediately available)
+      // Send run links (viewUrl immediately available, codeServerUrl will be sent when available)
       const viewUrl = this.linkBuilder.buildViewUrl(runId);
-      const codeProxyUrl = this.linkBuilder.buildCodeProxyUrl(sessionId);
       this.wsManager.sendToConnection(connId, {
         type: 'run_links',
         runId,
         sessionId,
         viewUrl,
-        codeProxyUrl,
       });
 
       // Start background polling for VS Code URL (code-server takes time to start)
@@ -284,13 +282,11 @@ export class CloudRunService {
 
       // Send run links
       const viewUrl = this.linkBuilder.buildViewUrl(runId);
-      const codeProxyUrl = this.linkBuilder.buildCodeProxyUrl(sessionId);
       this.wsManager.sendToConnection(connId, {
         type: 'run_links',
         runId,
         sessionId,
         viewUrl,
-        codeProxyUrl,
       });
 
       // Try to get VS Code URL immediately, or start polling if not available
@@ -355,13 +351,12 @@ export class CloudRunService {
       const tunnelUrl = await this.cloudManager.getVscodeUrl(sessionId).catch(() => null);
       if (tunnelUrl) {
         const vscodeUrl = this.linkBuilder.buildVscodeUrl(tunnelUrl);
-        const codeProxyUrl = this.linkBuilder.buildCodeProxyUrl(sessionId);
         this.wsManager.sendToConnection(connId, {
           type: 'run_links',
           runId,
           sessionId,
           vscodeUrl,
-          codeProxyUrl,
+          codeServerUrl: tunnelUrl,  // Direct Modal tunnel URL
         });
         this.logger.debug(`[ws][cloud] vscode url sent connId=${connId} runId=${runId}`);
         return;

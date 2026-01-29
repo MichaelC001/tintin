@@ -31,15 +31,6 @@ export class CloudLinkBuilder {
   }
 
   /**
-   * Build code proxy URL for iframe embedding of code-server.
-   * Returns a URL that goes through the tintin proxy, which strips X-Frame-Options headers.
-   */
-  buildCodeProxyUrl(sessionId: string): string | undefined {
-    const baseUrl = this.getPublicBaseUrl();
-    return `${baseUrl}/api/code-proxy/${sessionId}/`;
-  }
-
-  /**
    * Build the public base URL from config.
    */
   getPublicBaseUrl(): string {
