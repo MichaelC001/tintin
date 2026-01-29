@@ -2111,6 +2111,7 @@ export class CloudManager {
             envOverrides,
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
+            language,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -2555,6 +2556,7 @@ AGENTS_EOF`;
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
     extraBootstrapLines?: string[] | null;
+    language: UserLanguage;
   }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -2661,6 +2663,11 @@ AGENTS_EOF`;
       });
     }
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
+
+    // Ensure AGENTS.md is present on the remote with all prompts
+    if (this.provider.id === "modal" && typeof sandbox.exec === "function") {
+      await this.ensureRemoteAgentsMd(sandbox, opts.language, modalCfg.request_timeout_ms);
+    }
 
     if (this.provider.id === "modal") {
       const binary = opts.agent === "claude_code" ? modalCfg.claude_binary : modalCfg.codex_binary;
@@ -3566,6 +3573,7 @@ AGENTS_EOF`;
             envOverrides,
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
+            language,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
