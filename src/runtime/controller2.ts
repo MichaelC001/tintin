@@ -15,6 +15,7 @@ import {
   type TelegramUpdate,
 } from "./platform/telegram.js";
 import { SlackClient } from "./platform/slack.js";
+import type { IMessagingPlatform, InteractiveMarkup } from "./platform/base.js";
 import { redactText } from "./redact.js";
 import type { SendToSessionFn } from "./messaging.js";
 import { validateAndResolveProjectPath } from "./security.js";
@@ -63,6 +64,7 @@ import {
   enqueuePendingMessage,
   getUserLanguage,
   getSessionBySpace,
+  getLatestSessionForChat,
   getWizardState,
   listSessionsForChat,
   setUserLanguage,
@@ -103,6 +105,15 @@ type IdentityRepo = Awaited<ReturnType<typeof listReposForIdentity>>[number];
 
 export type CommitProposalAction = "cancel" | "push" | "pr";
 
+type SharedInteractionAction =
+  | { kind: "lang"; value: UserLanguage }
+  | { kind: "kill"; sessionId: string }
+  | { kind: "review"; sessionId: string }
+  | { kind: "commit"; sessionId: string }
+  | { kind: "run_status"; runId: string }
+  | { kind: "stop_sandbox"; sessionId: string }
+  | { kind: "commit_proposal"; proposalId: string; action: CommitProposalAction };
+
 export interface CommitProposal {
   id: string;
   sessionId: string;
@@ -124,6 +135,7 @@ export interface CommitProposalStore {
     chatId: string;
     userId: string;
     spaceId: string;
+    workspaceId: string | null;
     isTelegramTopic: boolean;
     gitUserName: string | null;
     gitUserEmail: string | null;
@@ -217,7 +229,13 @@ export class BotController {
     }
   }
 
-  private async disableReviewCommitButtonsSlack(opts: { channelId: string; ts: string; text?: string; note?: string }) {
+  private async disableReviewCommitButtonsSlack(opts: {
+    channelId: string;
+    ts: string;
+    text?: string;
+    note?: string;
+    workspaceId?: string | null;
+  }) {
     if (!this.slack) return;
     const note = (opts.note ?? "").trim();
     const baseText = typeof opts.text === "string" ? opts.text : "";
@@ -231,6 +249,7 @@ export class BotController {
           ts: opts.ts,
           text: "",
           blocks: undefined,
+          workspaceId: opts.workspaceId,
         });
       } catch (e) {
         this.logger.debug(`[slack] failed to clear buttons channel=${opts.channelId} ts=${opts.ts}: ${String(e)}`);
@@ -244,6 +263,7 @@ export class BotController {
         ts: opts.ts,
         text: updatedText || note || "",
         blocks: undefined,
+        workspaceId: opts.workspaceId,
       });
     } catch (e) {
       this.logger.debug(`[slack] failed to clear buttons channel=${opts.channelId} ts=${opts.ts}: ${String(e)}`);
@@ -594,6 +614,7 @@ export class BotController {
         platform: "telegram",
         chatId,
         userId,
+        workspaceId: null,
         replyToMessageId: message.message_id,
         messageThreadId: forumThreadId,
       });
@@ -754,22 +775,14 @@ export class BotController {
     const raw = opts.rawArg.trim();
     const cmdHint = opts.isDirect ? "lang en" : "@bot lang en";
     const requested = raw ? normalizeLanguageToken(raw) : null;
-    const threadTs = this.config.slack?.session_mode === "thread" ? opts.spaceId : undefined;
+    const threadTs = undefined;
     const sendText = async (text: string) => {
-      if (opts.isDirect) {
-        await slack.postMessageDetailed({
-          channel: opts.channelId,
-          thread_ts: threadTs,
-          text,
-          blocksOnLastChunk: false,
-        });
-        return;
-      }
-      await slack.postEphemeral({
+      await slack.postMessageDetailed({
         channel: opts.channelId,
-        user: opts.userId,
         text,
         thread_ts: threadTs,
+        blocksOnLastChunk: false,
+        workspaceId: opts.teamId ?? null,
       });
     };
 
@@ -779,7 +792,7 @@ export class BotController {
       return;
     }
 
-    const session = await getSessionBySpace(this.db, "slack", opts.channelId, opts.spaceId);
+    const session = await getLatestSessionForChat(this.db, "slack", opts.channelId, ["starting", "running"]);
     if (!session) {
       const nextLang = requested ?? getOtherLanguage(fallbackLang);
       await setUserLanguage(this.db, "slack", opts.userId, nextLang);
@@ -839,27 +852,508 @@ export class BotController {
     return await getUserLanguage(this.db, platform, userId);
   }
 
+  private buildRunActionMarkup(opts: {
+    platform: "telegram" | "slack";
+    sessionId: string;
+    runId: string;
+    lang: UserLanguage;
+    viewUrl?: string | null;
+    vscodeUrl?: string | null;
+  }): InteractiveMarkup {
+    if (opts.platform === "telegram") {
+      return {
+        type: "inline_keyboard",
+        payload: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
+      };
+    }
+    return {
+      type: "blocks",
+      payload: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId, opts.lang, opts.viewUrl, opts.vscodeUrl),
+    };
+  }
+
+  private async sendPlatformMessage(opts: {
+    platform: IMessagingPlatform | null;
+    chatId: string;
+    text: string;
+    markup?: InteractiveMarkup;
+    threadId?: string | number;
+    replyToMessageId?: string | number;
+    priority?: "user" | "background";
+    workspaceId?: string | null;
+  }) {
+    if (!opts.platform) return;
+    const priority = opts.priority ?? "user";
+    const threadId =
+      typeof opts.threadId === "number" ? (Number.isFinite(opts.threadId) ? String(opts.threadId) : undefined) : opts.threadId;
+    const replyToMessageId =
+      typeof opts.replyToMessageId === "number"
+        ? Number.isFinite(opts.replyToMessageId)
+          ? String(opts.replyToMessageId)
+          : undefined
+        : opts.replyToMessageId;
+    if (opts.platform.platformName === "slack") {
+      await (opts.platform as SlackClient).sendMessage({
+        chatId: opts.chatId,
+        text: opts.text,
+        threadId: undefined,
+        replyToMessageId,
+        markup: opts.markup,
+        priority,
+        workspaceId: opts.workspaceId,
+      });
+      return;
+    }
+    await opts.platform.sendMessage({
+      chatId: opts.chatId,
+      text: opts.text,
+      threadId,
+      replyToMessageId,
+      markup: opts.markup,
+      priority,
+    });
+  }
+
+  private async disableReviewCommitButtons(opts: {
+    platform: "telegram" | "slack";
+    chatId: string;
+    messageId: string;
+    text?: string;
+    note?: string;
+    workspaceId?: string | null;
+  }) {
+    if (opts.platform === "telegram") {
+      const messageId = Number(opts.messageId);
+      if (!Number.isFinite(messageId)) return;
+      await this.disableReviewCommitButtonsTelegram({
+        chatId: opts.chatId,
+        messageId,
+        text: opts.text,
+        note: opts.note,
+      });
+      return;
+    }
+    await this.disableReviewCommitButtonsSlack({
+      channelId: opts.chatId,
+      ts: opts.messageId,
+      text: opts.text,
+      note: opts.note,
+      workspaceId: opts.workspaceId,
+    });
+  }
+  private parseTelegramInteractionAction(data: string): SharedInteractionAction | null {
+    if (data.startsWith("lang:")) {
+      const next = data.slice("lang:".length);
+      return isUserLanguage(next) ? { kind: "lang", value: next } : null;
+    }
+    if (data.startsWith("kill:")) {
+      const sessionId = data.slice("kill:".length);
+      return sessionId ? { kind: "kill", sessionId } : null;
+    }
+    if (data.startsWith("review:")) {
+      const sessionId = data.slice("review:".length);
+      return sessionId ? { kind: "review", sessionId } : null;
+    }
+    if (data.startsWith("commit:")) {
+      const sessionId = data.slice("commit:".length);
+      return sessionId ? { kind: "commit", sessionId } : null;
+    }
+    if (data.startsWith("run_status:")) {
+      const runId = data.slice("run_status:".length).trim();
+      return runId ? { kind: "run_status", runId } : null;
+    }
+    if (data.startsWith("stop_sandbox:")) {
+      const sessionId = data.slice("stop_sandbox:".length);
+      return sessionId ? { kind: "stop_sandbox", sessionId } : null;
+    }
+    if (data.startsWith("cpr:")) {
+      const rest = data.slice("cpr:".length);
+      const [proposalId, actionRaw] = rest.split(":");
+      const action = (actionRaw ?? "").trim() as CommitProposalAction;
+      if (!proposalId || (action !== "cancel" && action !== "push" && action !== "pr")) return null;
+      return { kind: "commit_proposal", proposalId, action };
+    }
+    return null;
+  }
+
+  private parseSlackInteractionAction(actionId: string, value: string | null): SharedInteractionAction | null {
+    if (actionId === "switch_language") {
+      if (!value || !isUserLanguage(value)) return null;
+      return { kind: "lang", value };
+    }
+    if (actionId === "kill_session" && value) return { kind: "kill", sessionId: value };
+    if (actionId === "review_session" && value) return { kind: "review", sessionId: value };
+    if (actionId === "commit_session" && value) return { kind: "commit", sessionId: value };
+    if (actionId === "run_status" && value) return { kind: "run_status", runId: value };
+    if (actionId === "stop_sandbox" && value) return { kind: "stop_sandbox", sessionId: value };
+    if (actionId === "commit_cancel" && value) return { kind: "commit_proposal", proposalId: value, action: "cancel" };
+    if (actionId === "commit_push" && value) return { kind: "commit_proposal", proposalId: value, action: "push" };
+    if (actionId === "commit_pr" && value) return { kind: "commit_proposal", proposalId: value, action: "pr" };
+    return null;
+  }
+
+  private async handleSharedInteractionAction(opts: {
+    platform: "telegram" | "slack";
+    action: SharedInteractionAction;
+    chatId: string;
+    userId: string;
+    workspaceId: string | null;
+    messageId?: string;
+    messageText?: string;
+    threadTs?: string;
+    interactionId?: string;
+    replyToMessageId?: number;
+    messageThreadId?: number;
+    isDirect: boolean;
+  }): Promise<boolean> {
+    const actorLang = await this.resolveUserLanguage(opts.platform, opts.userId);
+    const respond = async (text: string) => {
+      if (opts.platform === "telegram") {
+        if (!this.telegram || !opts.interactionId) return;
+        await this.telegram.answerCallbackQuery(opts.interactionId, text);
+        return;
+      }
+      if (!this.slack) return;
+      await this.slack.postEphemeral({
+        channel: opts.chatId,
+        user: opts.userId,
+        thread_ts: opts.threadTs,
+        text,
+        workspaceId: opts.workspaceId,
+      });
+    };
+    const sendError = async (message: string) => {
+      if (opts.platform === "telegram") {
+        await this.sendPlatformMessage({
+          platform: this.telegram,
+          chatId: opts.chatId,
+          text: message,
+          replyToMessageId: opts.replyToMessageId,
+          threadId: opts.messageThreadId,
+          priority: "user",
+        });
+        return;
+      }
+      if (!this.slack) return;
+      await this.slack.postEphemeral({
+        channel: opts.chatId,
+        user: opts.userId,
+        thread_ts: opts.threadTs,
+        text: message,
+        workspaceId: opts.workspaceId,
+      });
+    };
+    switch (opts.action.kind) {
+      case "lang": {
+        const next = opts.action.value;
+        await setUserLanguage(this.db, opts.platform, opts.userId, next);
+        await this.db
+          .updateTable("sessions")
+          .set({ language: next, updated_at: nowMs() })
+          .where("platform", "=", opts.platform)
+          .where("created_by_user_id", "=", opts.userId)
+          .where("status", "in", ["starting", "running"])
+          .execute();
+        const confirmKey = next === "zh" ? "lang.switched_zh" : "lang.switched_en";
+        await respond(t(confirmKey, next));
+        return true;
+      }
+      case "kill": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected kill action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", opts.action.sessionId)
+          .executeTakeFirst();
+        if (!session || session.platform !== opts.platform || session.chat_id !== opts.chatId) {
+          await respond(t("session.not_found", actorLang));
+          return true;
+        }
+        if (session.status !== "starting" && session.status !== "running") {
+          await respond(t("session.already_finished", actorLang));
+          return true;
+        }
+        const isCloudSession = await this.isCloudSession(session as SessionRow);
+        if (isCloudSession && this.cloudManager) {
+          await respond(t("run.stopping", actorLang));
+          try {
+            await this.cloudManager.stopSandboxForSession(opts.action.sessionId);
+            await this.sendSessionMessageMarkdown(session as SessionRow, t("run.stopped", this.resolveSessionLanguage(session as SessionRow)));
+          } catch (e) {
+            this.logger.warn(
+              `[${opts.platform}] stop run failed chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId}: ${String(e)}`,
+            );
+            await this.sendSessionMessageMarkdown(
+              session as SessionRow,
+              t("run.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
+                error: redactText(e instanceof Error ? e.message : String(e)),
+              }),
+            );
+          }
+          return true;
+        }
+        await respond(t("session.stopping", actorLang));
+        await this.sessionManager.killSession(opts.action.sessionId, t("session.stop_requested", this.resolveSessionLanguage(session as SessionRow)));
+        return true;
+      }
+      case "review": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected review action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", opts.action.sessionId)
+          .executeTakeFirst();
+        if (!session || session.platform !== opts.platform || session.chat_id !== opts.chatId) {
+          await respond(t("session.not_found", actorLang));
+          return true;
+        }
+        this.markReviewCommitDisabled(opts.action.sessionId);
+        if (opts.messageId) {
+          await this.disableReviewCommitButtons({
+            platform: opts.platform,
+            chatId: opts.chatId,
+            messageId: opts.messageId,
+            text: opts.messageText,
+            note: t("review.started_note", this.resolveSessionLanguage(session as SessionRow)),
+          });
+        }
+        await respond(t("session.starting_review", actorLang));
+        try {
+          await this.handleSessionMessage(session as SessionRow, opts.userId, REVIEW_PROMPT);
+        } catch (e) {
+          this.logger.warn(
+            `[${opts.platform}] review action failed chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId}: ${String(e)}`,
+          );
+          await sendError(
+            t("error.generic", actorLang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+          );
+        }
+        return true;
+      }
+      case "commit": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected commit action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", opts.action.sessionId)
+          .executeTakeFirst();
+        if (!session || session.platform !== opts.platform || session.chat_id !== opts.chatId) {
+          await respond(t("session.not_found", actorLang));
+          return true;
+        }
+        this.markReviewCommitDisabled(opts.action.sessionId);
+        if (opts.messageId) {
+          await this.disableReviewCommitButtons({
+            platform: opts.platform,
+            chatId: opts.chatId,
+            messageId: opts.messageId,
+            text: opts.messageText,
+            workspaceId: opts.workspaceId,
+          });
+        }
+        const isCloudSession = await this.isCloudSession(session as SessionRow);
+        if (isCloudSession && this.cloudManager && this.commitProposalStore) {
+          const identity = await getOrCreateIdentity(this.db, {
+            platform: session.platform,
+            workspaceId: session.workspace_id ?? null,
+            userId: session.created_by_user_id,
+          });
+          this.commitProposalStore.startProposal({
+            sessionId: opts.action.sessionId,
+            platform: opts.platform,
+            chatId: opts.chatId,
+            userId: opts.userId,
+            spaceId: session.space_id,
+            workspaceId: session.workspace_id ?? opts.workspaceId ?? null,
+            isTelegramTopic: this.isTelegramTopicSession(session),
+            gitUserName: identity.git_user_name,
+            gitUserEmail: identity.git_user_email,
+          });
+          await respond(t("commit.proposal.preparing", actorLang));
+          try {
+            await this.handleSessionMessage(session as SessionRow, opts.userId, buildCommitProposalPrompt(identity.branch_name_rule));
+          } catch (e) {
+            this.logger.warn(
+              `[${opts.platform}] commit proposal failed chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId}: ${String(e)}`,
+            );
+            await sendError(
+              t("error.generic", actorLang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+            );
+          }
+          return true;
+        }
+        await respond(t("session.committing", actorLang));
+        try {
+          await this.handleSessionMessage(session as SessionRow, opts.userId, COMMIT_PROMPT);
+        } catch (e) {
+          this.logger.warn(
+            `[${opts.platform}] commit action failed chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId}: ${String(e)}`,
+          );
+          await sendError(
+            t("error.generic", actorLang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
+          );
+        }
+        return true;
+      }
+      case "run_status": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected run status action chat=${opts.chatId} user=${opts.userId} run=${opts.action.runId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        await respond(t("run.status_fetching", actorLang));
+        await this.sendCloudRunStatus({
+          platform: opts.platform,
+          chatId: opts.chatId,
+          userId: opts.userId,
+          workspaceId: opts.workspaceId,
+          runId: opts.action.runId,
+          isDirect: opts.isDirect,
+          replyToMessageId: opts.replyToMessageId,
+          messageThreadId: opts.messageThreadId,
+          slackThreadTs: opts.threadTs,
+        });
+        return true;
+      }
+      case "stop_sandbox": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected stop sandbox action chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", opts.action.sessionId)
+          .executeTakeFirst();
+        if (!session || session.platform !== opts.platform || session.chat_id !== opts.chatId) {
+          await respond(t("session.not_found", actorLang));
+          return true;
+        }
+        const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
+        if (!this.cloudManager || !isCloudSession) {
+          await respond(t("sandbox.stop_unavailable", actorLang));
+          return true;
+        }
+        await respond(t("sandbox.stopping", actorLang));
+        try {
+          await this.cloudManager.stopSandboxForSession(opts.action.sessionId);
+          await this.sendSessionMessageMarkdown(session as SessionRow, t("sandbox.stopped", this.resolveSessionLanguage(session as SessionRow)));
+        } catch (e) {
+          this.logger.warn(
+            `[${opts.platform}] stop sandbox action failed chat=${opts.chatId} user=${opts.userId} session=${opts.action.sessionId}: ${String(e)}`,
+          );
+          await this.sendSessionMessageMarkdown(
+            session as SessionRow,
+            t("sandbox.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
+              error: redactText(e instanceof Error ? e.message : String(e)),
+            }),
+          );
+        }
+        return true;
+      }
+      case "commit_proposal": {
+        const access =
+          opts.platform === "telegram"
+            ? await this.telegramAccessDecision(opts.chatId, opts.userId)
+            : this.slackAccessDecision(opts.workspaceId, opts.chatId, opts.userId);
+        if (!access.allowed) {
+          this.logger.warn(
+            `[${opts.platform}] rejected commit proposal action chat=${opts.chatId} user=${opts.userId} proposal=${opts.action.proposalId} reason=${access.reason ?? "-"}`,
+          );
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const proposal = this.commitProposalStore?.getProposal(opts.action.proposalId) ?? null;
+        if (!proposal) {
+          await respond(t("commit.proposal.expired", actorLang));
+          return true;
+        }
+        if (proposal.platform !== opts.platform || proposal.chatId !== opts.chatId || proposal.userId !== opts.userId) {
+          await respond(t("error.not_authorized", actorLang));
+          return true;
+        }
+        const session = await this.db
+          .selectFrom("sessions")
+          .selectAll()
+          .where("id", "=", proposal.sessionId)
+          .executeTakeFirst();
+        if (!session || session.platform !== opts.platform || session.chat_id !== opts.chatId) {
+          await respond(t("session.not_found", actorLang));
+          return true;
+        }
+        await respond(t("action.processing", actorLang));
+        await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action: opts.action.action });
+        return true;
+      }
+    }
+  }
   private async sendSessionMessageMarkdown(session: SessionRow, text: string) {
-    const lang = this.resolveSessionLanguage(session);
     if (session.platform === "telegram") {
-      if (!this.telegram) return;
       const chatId = Number(session.chat_id);
       const space = Number(session.space_id);
       if (Number.isNaN(chatId) || Number.isNaN(space)) return;
-      await this.telegram.sendMessage(
-        this.isTelegramTopicSession(session)
-          ? { chatId, messageThreadId: space, text, priority: "user" }
-          : { chatId, replyToMessageId: space, text, priority: "user" },
-      );
+      await this.sendPlatformMessage({
+        platform: this.telegram,
+        chatId: session.chat_id,
+        text,
+        replyToMessageId: this.isTelegramTopicSession(session) ? undefined : space,
+        threadId: this.isTelegramTopicSession(session) ? space : undefined,
+        priority: "user",
+      });
       return;
     }
     if (session.platform === "slack") {
-      if (!this.slack) return;
-      const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
-      await this.slack.postMessageDetailed({
-        channel: session.chat_id,
-        thread_ts: threadTs,
+      const threadTs = undefined;
+      await this.sendPlatformMessage({
+        platform: this.slack,
+        chatId: session.chat_id,
         text,
+        threadId: threadTs,
+        priority: "user",
+        workspaceId: session.workspace_id ?? null,
       });
     }
   }
@@ -868,20 +1362,20 @@ export class BotController {
     platform: "telegram" | "slack";
     chatId: string;
     userId: string;
+    workspaceId: string | null;
     text: string;
     replyToMessageId?: number;
     messageThreadId?: number;
     slackThreadTs?: string;
     ephemeral?: boolean;
   }) {
-    const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
     if (opts.platform === "telegram") {
-      if (!this.telegram) return;
-      await this.telegram.sendMessage({
-        chatId: Number(opts.chatId),
+      await this.sendPlatformMessage({
+        platform: this.telegram,
+        chatId: opts.chatId,
         text: opts.text,
         replyToMessageId: opts.replyToMessageId,
-        messageThreadId: opts.messageThreadId,
+        threadId: opts.messageThreadId,
         priority: "user",
       });
       return;
@@ -894,13 +1388,17 @@ export class BotController {
         channel: opts.chatId,
         user: opts.userId,
         text: opts.text,
+        workspaceId: opts.workspaceId,
       });
       return;
     }
-    await this.slack.postMessageDetailed({
-      channel: opts.chatId,
-      thread_ts: opts.slackThreadTs,
+    await this.sendPlatformMessage({
+      platform: this.slack,
+      chatId: opts.chatId,
       text: opts.text,
+      threadId: opts.slackThreadTs,
+      priority: "user",
+      workspaceId: opts.workspaceId,
     });
   }
 
@@ -961,6 +1459,7 @@ export class BotController {
     platform: "telegram" | "slack";
     chatId: string;
     userId: string;
+    workspaceId: string | null;
     text: string;
     sessionId: string;
     runId: string;
@@ -971,25 +1470,25 @@ export class BotController {
     slackThreadTs?: string;
   }) {
     const lang = await this.resolveUserLanguage(opts.platform, opts.userId);
-    if (opts.platform === "telegram") {
-      if (!this.telegram) return;
-      await this.telegram.sendMessage({
-        chatId: Number(opts.chatId),
-        text: opts.text,
-        replyToMessageId: opts.replyToMessageId,
-        messageThreadId: opts.messageThreadId,
-        replyMarkup: this.buildRunActionTelegramKeyboard(opts.sessionId, opts.runId, lang, opts.viewUrl, opts.vscodeUrl),
-        priority: "user",
-      });
-      return;
-    }
-    if (!this.slack) return;
-    await this.slack.postMessageDetailed({
-      channel: opts.chatId,
-      thread_ts: opts.slackThreadTs,
+    const markup = this.buildRunActionMarkup({
+      platform: opts.platform,
+      sessionId: opts.sessionId,
+      runId: opts.runId,
+      lang,
+      viewUrl: opts.viewUrl,
+      vscodeUrl: opts.vscodeUrl,
+    });
+    const platformClient = opts.platform === "telegram" ? this.telegram : this.slack;
+    const threadId = opts.platform === "telegram" ? opts.messageThreadId : opts.slackThreadTs;
+    await this.sendPlatformMessage({
+      platform: platformClient,
+      chatId: opts.chatId,
       text: opts.text,
-      blocks: this.buildRunActionSlackBlocks(opts.sessionId, opts.runId, lang, opts.viewUrl, opts.vscodeUrl),
-      blocksOnLastChunk: false,
+      replyToMessageId: opts.replyToMessageId,
+      threadId,
+      markup,
+      priority: "user",
+      workspaceId: opts.workspaceId,
     });
   }
 
@@ -1100,6 +1599,7 @@ export class BotController {
     platform: "telegram" | "slack";
     chatId: string;
     userId: string;
+    workspaceId: string | null;
     replyToMessageId?: number;
     messageThreadId?: number;
     slackThreadTs?: string;
@@ -1149,6 +1649,7 @@ export class BotController {
         platform: opts.platform,
         chatId: opts.chatId,
         userId: opts.userId,
+        workspaceId: opts.workspaceId,
         text: t("cloud.disabled", lang),
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
@@ -1168,6 +1669,7 @@ export class BotController {
         platform: opts.platform,
         chatId: opts.chatId,
         userId: opts.userId,
+        workspaceId: opts.workspaceId,
         text: t("cloud.setup_required", lang),
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
@@ -1181,6 +1683,7 @@ export class BotController {
         platform: opts.platform,
         chatId: opts.chatId,
         userId: opts.userId,
+        workspaceId: opts.workspaceId,
         text,
         replyToMessageId: opts.replyToMessageId,
         messageThreadId: opts.messageThreadId,
@@ -1213,6 +1716,7 @@ export class BotController {
           chat_id: opts.chatId,
           user_id: opts.userId,
           space_id: opts.spaceId,
+          workspace_id: opts.workspaceId,
         });
         try {
           if (provider === "chatgpt") {
@@ -1666,8 +2170,8 @@ export class BotController {
         this.lastRepoListByIdentity.set(identity.id, repos.map((r) => r.id));
         const title = t("repos.title", lang);
         const selectHint = t("repos.select_hint", lang, {
-          select: formatCmd("repo select <number>"),
-          playground: formatCmd("repo select playground"),
+          cmd: formatCmd("repo select <number>"),
+          cmd2: formatCmd("repo select playground"),
         });
         if (repos.length === 0) {
           const lines = [title, playgroundLine, "", selectHint];
@@ -1957,6 +2461,7 @@ export class BotController {
             platform: opts.platform,
             chatId: opts.chatId,
             userId: opts.userId,
+            workspaceId: opts.workspaceId,
             text,
             sessionId: result.sessionId,
             runId: result.runId,
@@ -2053,6 +2558,7 @@ export class BotController {
             platform: opts.platform,
             chatId: opts.chatId,
             userId: opts.userId,
+            workspaceId: opts.workspaceId,
             text,
             sessionId: result.sessionId,
             runId: result.runId,
@@ -2293,326 +2799,40 @@ export class BotController {
         safeSnippet(data),
       )}`,
     );
-    const actorLang = await this.resolveUserLanguage("telegram", String(cb.from.id));
-    if (data.startsWith("kill:")) {
-      const sessionId = data.slice("kill:".length);
+    const action = this.parseTelegramInteractionAction(data);
+    if (action) {
       const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
+      const chatId = chat ? String(chat.id) : "";
       const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected kill callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      if (session.status !== "starting" && session.status !== "running") {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.already_finished", actorLang));
-        return;
-      }
-
-      const isCloudSession = await this.isCloudSession(session as SessionRow);
-      if (isCloudSession && this.cloudManager) {
-        await this.telegram.answerCallbackQuery(cb.id, t("run.stopping", actorLang));
-        try {
-          await this.cloudManager.stopSandboxForSession(sessionId);
-          await this.sendSessionMessageMarkdown(session as SessionRow, t("run.stopped", this.resolveSessionLanguage(session as SessionRow)));
-        } catch (e) {
-          this.logger.warn(`[tg] stop run failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
-          const lang = this.resolveSessionLanguage(session as SessionRow);
-          await this.sendSessionMessageMarkdown(
-            session as SessionRow,
-            t("run.stop_failed", lang, {
-              error: redactText(e instanceof Error ? e.message : String(e)),
-            }),
-          );
-        }
-        return;
-      }
-
-      await this.telegram.answerCallbackQuery(cb.id, t("session.stopping", actorLang));
-      await this.sessionManager.killSession(sessionId, t("session.stop_requested", this.resolveSessionLanguage(session as SessionRow)));
-      return;
-    }
-
-    if (data.startsWith("review:")) {
-      const sessionId = data.slice("review:".length);
-      const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
-      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      const messageId = cb.message?.message_id ?? null;
+      const messageId = cb.message?.message_id ? String(cb.message.message_id) : undefined;
       // @ts-ignore
       const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
-      if (!chatId || !sessionId) {
+      const actorLang = await this.resolveUserLanguage("telegram", String(cb.from.id));
+      if (!chatId && action.kind !== "lang") {
         await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
         return;
       }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected review callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-
-      this.markReviewCommitDisabled(sessionId);
-      if (messageId !== null) {
-        await this.disableReviewCommitButtonsTelegram({
-          chatId,
-          messageId,
-          text: messageText,
-          note: t("review.started_note", this.resolveSessionLanguage(session as SessionRow)),
-        });
-      }
-
-      await this.telegram.answerCallbackQuery(cb.id, t("session.starting_review", actorLang));
-      try {
-        await this.handleSessionMessage(session as SessionRow, userId, REVIEW_PROMPT);
-      } catch (e) {
-        this.logger.warn(
-          `[tg] review callback failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
-        );
-        try {
-          const lang = this.resolveSessionLanguage(session as SessionRow);
-          await this.telegram.sendMessage({
-            chatId,
-            messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
-            replyToMessageId: cb.message?.message_id,
-            text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-            priority: "user",
-          });
-        } catch {}
-      }
-      return;
-    }
-
-    if (data.startsWith("commit:")) {
-      const sessionId = data.slice("commit:".length);
-      const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
-      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      const messageId = cb.message?.message_id ?? null;
-      // @ts-ignore
-      const messageText = cb.message?.text ?? cb.message?.caption ?? undefined;
-      if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected commit callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-
-      this.markReviewCommitDisabled(sessionId);
-      if (messageId !== null) {
-        await this.disableReviewCommitButtonsTelegram({ chatId, messageId, text: messageText });
-      }
-
-      const isCloudSession = await this.isCloudSession(session as SessionRow);
-      if (isCloudSession && this.cloudManager && this.commitProposalStore) {
-        const identity = await getOrCreateIdentity(this.db, {
-          platform: session.platform,
-          workspaceId: session.workspace_id ?? null,
-          userId: session.created_by_user_id,
-        });
-        this.commitProposalStore.startProposal({
-          sessionId,
-          platform: "telegram",
-          chatId,
-          userId,
-          spaceId: session.space_id,
-          isTelegramTopic: this.isTelegramTopicSession(session),
-          gitUserName: identity.git_user_name,
-          gitUserEmail: identity.git_user_email,
-        });
-        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.preparing", actorLang));
-        try {
-          await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
-        } catch (e) {
-          this.logger.warn(
-            `[tg] commit proposal failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
-          );
-          try {
-            const lang = this.resolveSessionLanguage(session as SessionRow);
-            await this.telegram.sendMessage({
-              chatId,
-              messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
-              replyToMessageId: cb.message?.message_id,
-              text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-              priority: "user",
-            });
-          } catch {}
-        }
-        return;
-      }
-
-      await this.telegram.answerCallbackQuery(cb.id, t("session.committing", actorLang));
-      try {
-        await this.handleSessionMessage(session as SessionRow, userId, COMMIT_PROMPT);
-      } catch (e) {
-        this.logger.warn(
-          `[tg] commit callback failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`,
-        );
-        try {
-          const lang = this.resolveSessionLanguage(session as SessionRow);
-          await this.telegram.sendMessage({
-            chatId,
-            messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
-            replyToMessageId: cb.message?.message_id,
-            text: t("error.generic", lang, { message: redactText(e instanceof Error ? e.message : String(e)) }),
-            priority: "user",
-          });
-        } catch {}
-      }
-      return;
-    }
-
-    if (data.startsWith("run_status:")) {
-      const runId = data.slice("run_status:".length).trim();
-      const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
-      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      if (!chatId || !runId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("run.not_found", actorLang));
-        return;
-      }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected run status callback chat=${chatId} user=${userId} run=${runId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      await this.telegram.answerCallbackQuery(cb.id, t("run.status_fetching", actorLang));
-      await this.sendCloudRunStatus({
+      const handled = await this.handleSharedInteractionAction({
         platform: "telegram",
+        action,
         chatId,
         userId,
         workspaceId: null,
-        runId,
-        isDirect: chat?.type === "private",
+        messageId,
+        messageText,
+        interactionId: cb.id,
         replyToMessageId: cb.message?.message_id,
         messageThreadId: this.telegramForumThreadIdFromMessage(cb.message),
+        isDirect: chat?.type === "private",
       });
-      return;
-    }
-
-    if (data.startsWith("stop_sandbox:")) {
-      const sessionId = data.slice("stop_sandbox:".length);
-      const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
-      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      if (!chatId || !sessionId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected stop sandbox callback chat=${chatId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
-      if (!this.cloudManager || !isCloudSession) {
-        await this.telegram.answerCallbackQuery(cb.id, t("sandbox.stop_unavailable", actorLang));
-        return;
-      }
-      await this.telegram.answerCallbackQuery(cb.id, t("sandbox.stopping", actorLang));
-      try {
-        await this.cloudManager.stopSandboxForSession(sessionId);
-        await this.sendSessionMessageMarkdown(session as SessionRow, t("sandbox.stopped", this.resolveSessionLanguage(session as SessionRow)));
-      } catch (e) {
-        this.logger.warn(`[tg] stop sandbox failed chat=${chatId} user=${userId} session=${sessionId}: ${String(e)}`);
-        const lang = this.resolveSessionLanguage(session as SessionRow);
-        await this.sendSessionMessageMarkdown(
-          session as SessionRow,
-          t("sandbox.stop_failed", lang, {
-            error: redactText(e instanceof Error ? e.message : String(e)),
-          }),
-        );
-      }
-      return;
-    }
-
-    if (data.startsWith("cpr:")) {
-      const rest = data.slice("cpr:".length);
-      const [proposalId, actionRaw] = rest.split(":");
-      const action = (actionRaw ?? "").trim() as CommitProposalAction;
-      const chat = cb.message?.chat;
-      const chatId = chat ? String(chat.id) : null;
-      const userId = chat && chat.type === "channel" ? String(chat.id) : String(cb.from.id);
-      if (!chatId || !proposalId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.not_found", actorLang));
-        return;
-      }
-      const access = await this.telegramAccessDecision(chatId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[tg] rejected commit proposal callback chat=${chatId} user=${userId} proposal=${proposalId} reason=${access.reason ?? "-"}`,
-        );
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      if (action !== "cancel" && action !== "push" && action !== "pr") {
-        await this.telegram.answerCallbackQuery(cb.id, t("action.unsupported", actorLang));
-        return;
-      }
-      const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
-      if (!proposal) {
-        await this.telegram.answerCallbackQuery(cb.id, t("commit.proposal.expired", actorLang));
-        return;
-      }
-      if (proposal.platform !== "telegram" || proposal.chatId !== chatId || proposal.userId !== userId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("error.not_authorized", actorLang));
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
-      if (!session || session.platform !== "telegram" || session.chat_id !== chatId) {
-        await this.telegram.answerCallbackQuery(cb.id, t("session.not_found", actorLang));
-        return;
-      }
-      await this.telegram.answerCallbackQuery(cb.id, t("action.processing", actorLang));
-      await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action });
-      return;
+      if (handled) return;
     }
 
     if (!data.startsWith("proj:")) {
       await this.telegram.answerCallbackQuery(cb.id);
       return;
     }
+    const actorLang = await this.resolveUserLanguage("telegram", String(cb.from.id));
     const projectId = data.slice("proj:".length);
     const project = this.projectById(projectId);
 
@@ -2668,28 +2888,28 @@ export class BotController {
     if (!this.telegram) return;
     const lang = await this.resolveUserLanguage("telegram", wizard.user_id);
 
-	    if (wizard.state === "await_project") {
-	      await this.telegram.sendMessage({
-	        chatId: wizard.chat_id,
-	        messageThreadId: ctx.messageThreadId,
-	        replyToMessageId: ctx.replyToMessageId,
-          text: t("wizard.choose_project_buttons", lang),
-	        priority: "user",
-	      });
-	      return;
-	    }
+    if (wizard.state === "await_project") {
+      await this.telegram.sendMessage({
+        chatId: wizard.chat_id,
+        messageThreadId: ctx.messageThreadId,
+        replyToMessageId: ctx.replyToMessageId,
+        text: t("wizard.choose_project_buttons", lang),
+        priority: "user",
+      });
+      return;
+    }
 
-	    if (!wizard.project_id) {
-	      await clearWizardState(this.db, "telegram", wizard.chat_id, wizard.user_id);
-	      await this.telegram.sendMessage({
-	        chatId: wizard.chat_id,
-	        messageThreadId: ctx.messageThreadId,
-	        replyToMessageId: ctx.replyToMessageId,
-          text: t("wizard.expired", lang),
-	        priority: "user",
-	      });
-	      return;
-	    }
+    if (!wizard.project_id) {
+      await clearWizardState(this.db, "telegram", wizard.chat_id, wizard.user_id);
+      await this.telegram.sendMessage({
+        chatId: wizard.chat_id,
+        messageThreadId: ctx.messageThreadId,
+        replyToMessageId: ctx.replyToMessageId,
+        text: t("wizard.expired", lang),
+        priority: "user",
+      });
+      return;
+    }
 
     const project = this.projectById(wizard.project_id);
 
@@ -2702,15 +2922,15 @@ export class BotController {
         custom_path_candidate: resolved.project_path_resolved,
         updated_at: nowMs(),
       });
-	      await this.telegram.sendMessage({
-	        chatId: wizard.chat_id,
-	        messageThreadId: ctx.messageThreadId,
-	        replyToMessageId: ctx.replyToMessageId,
-          text: t("wizard.path_accepted", lang),
-	        priority: "user",
-	      });
-	      return;
-	    }
+      await this.telegram.sendMessage({
+        chatId: wizard.chat_id,
+        messageThreadId: ctx.messageThreadId,
+        replyToMessageId: ctx.replyToMessageId,
+        text: t("wizard.path_accepted", lang),
+        priority: "user",
+      });
+      return;
+    }
 
     if (wizard.state === "await_initial_prompt") {
       const resolved = await validateAndResolveProjectPath(this.config, project, wizard.custom_path_candidate);
@@ -2819,24 +3039,24 @@ export class BotController {
             ? buildTelegramCustomEmojiEntity(announceText, topicEmoji, topicCustomEmojiId)
             : null;
         try {
-	          await this.telegram.sendMessageSingle({
-	            chatId: wizard.chat_id,
-	            messageThreadId: ctx.messageThreadId,
-	            replyToMessageId: ctx.replyToMessageId,
-	            text: announceText,
-	            entities: entity ? [entity] : undefined,
-	            priority: "user",
-	          });
-	        } catch {
-	          await this.telegram.sendMessage({
-	            chatId: wizard.chat_id,
-	            messageThreadId: ctx.messageThreadId,
-	            replyToMessageId: ctx.replyToMessageId,
-	            text: announceText,
-	            priority: "user",
-	          });
-	        }
-	      }
+          await this.telegram.sendMessageSingle({
+            chatId: wizard.chat_id,
+            messageThreadId: ctx.messageThreadId,
+            replyToMessageId: ctx.replyToMessageId,
+            text: announceText,
+            entities: entity ? [entity] : undefined,
+            priority: "user",
+          });
+        } catch {
+          await this.telegram.sendMessage({
+            chatId: wizard.chat_id,
+            messageThreadId: ctx.messageThreadId,
+            replyToMessageId: ctx.replyToMessageId,
+            text: announceText,
+            priority: "user",
+          });
+        }
+      }
 
       if (topicId && topicEmoji) {
         void this.updateTelegramTopicTitleAsync({
@@ -3030,156 +3250,51 @@ export class BotController {
 
     const ev = body.event;
     const teamId = typeof body.team_id === "string" ? body.team_id : null;
+    const enterpriseId = typeof body.enterprise_id === "string" ? body.enterprise_id : null;
+    const registerWorkspace = (channelId: string | null) => {
+      if (!channelId) return;
+      this.slack?.registerWorkspaceForChannel(channelId, { workspaceId: teamId, enterpriseId });
+    };
 
     if (ev.type === "app_mention") {
-      const channelId = ev.channel as string | undefined;
-      const userId = ev.user as string | undefined;
-      if (!channelId || !userId) return;
-      const access = this.slackAccessDecision(teamId, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(`[slack] rejected app_mention channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
-        return;
-      }
-      const lang = await this.resolveUserLanguage("slack", userId);
-
-      const text = typeof ev.text === "string" ? ev.text : "";
-      this.logger.debug(
-        `[slack] app_mention received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} text=${JSON.stringify(
-          safeSnippet(text),
-        )}`,
-      );
-      const listIntent = parseListSessionsIntentFromSlack(text);
-      if (listIntent) {
-        const sessionPage = await listSessionsForChat({
-          db: this.db,
-          platform: "slack",
-          workspaceId: teamId,
-          chatId: channelId,
-          statuses: listIntent.statuses,
-          limit: SESSION_LIST_PAGE_SIZE,
-          page: listIntent.page,
-        });
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          text: formatSessionList("slack", lang, { ...sessionPage, filterLabel: formatSessionFilterLabel(listIntent.statuses) }),
-        });
-        return;
-      }
-
-      const settingsIntent = parseSettingsIntentFromSlack(text);
-      if (settingsIntent) {
-        const identity = await getOrCreateIdentity(this.db, { platform: "slack", workspaceId: teamId ?? null, userId });
-        if (settingsIntent.cmd.kind === "list") {
-          let cloudKeyStatus: { openai: boolean; anthropic: boolean } | null = null;
-          if (this.config.cloud?.enabled) {
-            const secrets = await listSecrets(this.db, identity.id);
-            const names = new Set(secrets.map((s) => s.name));
-            cloudKeyStatus = {
-              openai: names.has("OPENAI_API_KEY"),
-              anthropic: names.has("ANTHROPIC_API_KEY"),
-            };
-          }
-          const result = formatSettingsSummary(this.config, settingsIntent.defaultAgent, "slack", lang, identity, cloudKeyStatus);
-          await this.slack.postEphemeral({
-            channel: channelId,
-            user: userId,
-            text: result,
-          });
-          return;
-        }
-        const cloudResult = await applyCloudSettingsCommand({
-          config: this.config,
-          db: this.db,
-          cmd: settingsIntent.cmd,
-          identityId: identity.id,
-          lang,
-        });
-        const identityResult = await applyIdentitySettingsCommand({
-          config: this.config,
-          db: this.db,
-          cmd: settingsIntent.cmd,
-          identityId: identity.id,
-          lang,
-        });
-        const result =
-          identityResult ??
-          cloudResult ??
-          applySettingsCommand(this.config, settingsIntent.cmd, settingsIntent.defaultAgent, "slack", lang);
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          text: result,
-        });
-        return;
-      }
-
-      const languageCmd = parseLanguageCommandFromSlack(text);
-      if (languageCmd) {
-        const spaceId =
-          this.config.slack?.session_mode === "thread"
-            ? typeof ev.thread_ts === "string"
-              ? ev.thread_ts
-              : typeof ev.ts === "string"
-                ? ev.ts
-                : channelId
-            : channelId;
-        await this.handleLanguageCommandSlack({
-          channelId,
-          userId,
-          teamId,
-          spaceId,
-          isDirect: channelId.startsWith("D"),
-          rawArg: languageCmd.raw,
-        });
-        return;
-      }
-
-      const cloudCmd = parseCloudCommand(text);
-      if (cloudCmd) {
-        const spaceId =
-          this.config.slack?.session_mode === "thread"
-            ? typeof ev.ts === "string"
-              ? ev.ts
-              : channelId
-            : channelId;
-        await this.handleCloudCommand({
-          platform: "slack",
-          command: cloudCmd,
-          chatId: channelId,
-          workspaceId: teamId,
-          userId,
-          isDirect: channelId.startsWith("D"),
-          spaceId,
-          slackThreadTs: spaceId,
-        });
-        return;
-      }
-
-      await this.startSlackWizard(teamId, channelId, userId);
+      this.logger.debug("[slack] ignore app_mention (DM-only mode)");
       return;
     }
 
     if (ev.type === "message") {
       if (ev.subtype) return;
+      if (typeof ev.bot_id === "string" || ev.bot_profile) {
+        this.logger.debug("[slack] ignore bot message");
+        return;
+      }
       const channelId = ev.channel as string | undefined;
       const userId = ev.user as string | undefined;
       const text = typeof ev.text === "string" ? ev.text.trim() : "";
       if (!channelId || !userId || !text) return;
+      if (!channelId.startsWith("D")) {
+        this.logger.debug(`[slack] ignore channel message (DM-only mode) channel=${channelId} user=${userId}`);
+        return;
+      }
+      registerWorkspace(channelId);
       const access = this.slackAccessDecision(teamId, channelId, userId);
       if (!access.allowed) {
         this.logger.warn(`[slack] rejected message channel=${channelId} user=${userId} reason=${access.reason ?? "-"}`);
         return;
       }
+      const threadTs = typeof ev.thread_ts === "string" ? ev.thread_ts : null;
+      if (threadTs && threadTs !== ev.ts) {
+        const lang = await this.resolveUserLanguage("slack", userId);
+        await this.slack.postMessageDetailed({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: t("slack.thread_unsupported", lang),
+          blocksOnLastChunk: false,
+          workspaceId: teamId,
+        });
+        return;
+      }
 
-      const cmdSpaceId =
-        this.config.slack?.session_mode === "thread"
-          ? typeof ev.thread_ts === "string"
-            ? ev.thread_ts
-            : typeof ev.ts === "string"
-              ? ev.ts
-              : channelId
-          : channelId;
+      const cmdSpaceId = channelId;
 
       this.logger.debug(
         `[slack] message received workspace=${String(teamId ?? "-")} channel=${channelId} user=${userId} space=${cmdSpaceId} text=${JSON.stringify(
@@ -3187,6 +3302,16 @@ export class BotController {
         )}`,
       );
 
+      if (isSlackHelpCommand(text)) {
+        await this.sendCloudHelp({
+          platform: "slack",
+          chatId: channelId,
+          userId,
+          workspaceId: teamId,
+        });
+        return;
+      }
+
       const languageCmd = parseLanguageCommandFromSlack(text);
       if (languageCmd) {
         await this.handleLanguageCommandSlack({
@@ -3202,6 +3327,7 @@ export class BotController {
 
       const cloudCmd = parseCloudCommand(text);
       if (cloudCmd) {
+        const spaceId = cloudCmd.kind === "action_run" ? `run:${crypto.randomUUID()}` : cmdSpaceId;
         await this.handleCloudCommand({
           platform: "slack",
           command: cloudCmd,
@@ -3209,23 +3335,18 @@ export class BotController {
           workspaceId: teamId,
           userId,
           isDirect: channelId.startsWith("D"),
-          spaceId: cmdSpaceId,
-          slackThreadTs: cmdSpaceId,
+          spaceId,
         });
         return;
       }
 
-      const spaceId =
-        this.config.slack?.session_mode === "thread"
-          ? typeof ev.thread_ts === "string"
-            ? ev.thread_ts
-            : null
-          : channelId;
+      const spaceId = channelId;
       if (!spaceId) return;
 
-      const session = await getSessionBySpace(this.db, "slack", channelId, spaceId);
+      const session = await getLatestSessionForChat(this.db, "slack", channelId, ["starting", "running"]);
       if (!session) {
-        this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}`);
+        this.logger.debug(`[slack] no session for space=${spaceId} channel=${channelId}; starting wizard`);
+        await this.startSlackWizard(teamId, channelId, userId);
         return;
       }
       this.logger.debug(
@@ -3258,12 +3379,14 @@ export class BotController {
       const user =
         (payload?.user?.id as string | undefined) ??
         (payload?.view?.private_metadata ? (safeParseMeta(payload.view.private_metadata)?.userId as string | undefined) : undefined);
+      const teamId = (payload?.team?.id as string | undefined) ?? null;
       if (channel && user) {
         const lang = await this.resolveUserLanguage("slack", user);
         await this.slack.postEphemeral({
           channel,
           user,
           text: t("error.generic", lang, { message: String(e) }),
+          workspaceId: teamId,
         });
       }
     }
@@ -3271,6 +3394,7 @@ export class BotController {
 
   private async startSlackWizard(teamId: string | null, channelId: string, userId: string) {
     if (!this.slack) return;
+    this.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId });
     const lang = await this.resolveUserLanguage("slack", userId);
     await setWizardState(this.db, {
       id: crypto.randomUUID(),
@@ -3293,9 +3417,8 @@ export class BotController {
     const menuText = buildMenuText("slack", "codex", lang);
     const commandExamples = buildCommandExamples("slack", lang);
 
-    await this.slack.postEphemeral({
+    await this.slack.postMessageDetailed({
       channel: channelId,
-      user: userId,
       text: menuText,
       blocks: [
         {
@@ -3313,6 +3436,8 @@ export class BotController {
           text: { type: "mrkdwn", text: commandExamples },
         },
       ],
+      blocksOnLastChunk: false,
+      workspaceId: teamId,
     });
   }
 
@@ -3320,311 +3445,33 @@ export class BotController {
     if (!this.slack) return;
     const action = payload.actions?.[0];
     if (!action) return;
-
-    if (action.action_id === "kill_session") {
-      const sessionId = typeof action.value === "string" ? action.value : null;
+    const actionId = action.action_id as string;
+    const actionValue = typeof action.value === "string" ? action.value : null;
+    const sharedAction = this.parseSlackInteractionAction(actionId, actionValue);
+    if (sharedAction) {
       const channelId = payload.channel?.id as string | undefined;
       const userId = payload.user?.id as string | undefined;
       const teamId = payload.team?.id as string | undefined;
-      if (!sessionId || !channelId || !userId) return;
-
-      const lang = await this.resolveUserLanguage("slack", userId);
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected kill action channel=${channelId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
-        return;
-      }
-      if (session.status !== "starting" && session.status !== "running") {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.already_finished", lang) });
-        return;
-      }
-
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
-      if (isCloudSession && this.cloudManager) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("run.stopping", lang) });
-        try {
-          await this.cloudManager.stopSandboxForSession(sessionId);
-          await this.sendSessionMessageMarkdown(session as SessionRow, t("run.stopped", this.resolveSessionLanguage(session as SessionRow)));
-        } catch (e) {
-          this.logger.warn(
-            `[slack] stop run failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
-          );
-          await this.sendSessionMessageMarkdown(
-            session as SessionRow,
-            t("run.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
-              error: redactText(e instanceof Error ? e.message : String(e)),
-            }),
-          );
-        }
-        return;
-      }
-
-      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.stopping", lang) });
-      await this.sessionManager.killSession(sessionId, t("session.stop_requested", this.resolveSessionLanguage(session as SessionRow)));
-      return;
-    }
-
-    if (action.action_id === "stop_sandbox") {
-      const sessionId = typeof action.value === "string" ? action.value : null;
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      const teamId = payload.team?.id as string | undefined;
-      if (!sessionId || !channelId || !userId) return;
-
-      const lang = await this.resolveUserLanguage("slack", userId);
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected stop sandbox action channel=${channelId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
-        return;
-      }
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
-      if (!this.cloudManager || !isCloudSession) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("sandbox.stop_unavailable", lang) });
-        return;
-      }
-
-      await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("sandbox.stopping", lang) });
-      try {
-        await this.cloudManager.stopSandboxForSession(sessionId);
-        await this.sendSessionMessageMarkdown(session as SessionRow, t("sandbox.stopped", this.resolveSessionLanguage(session as SessionRow)));
-      } catch (e) {
-        this.logger.warn(
-          `[slack] stop sandbox action failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
-        );
-        await this.sendSessionMessageMarkdown(
-          session as SessionRow,
-          t("sandbox.stop_failed", this.resolveSessionLanguage(session as SessionRow), {
-            error: redactText(e instanceof Error ? e.message : String(e)),
-          }),
-        );
-      }
-      return;
-    }
-
-    if (action.action_id === "run_status") {
-      const runId = typeof action.value === "string" ? action.value : null;
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      const teamId = payload.team?.id as string | undefined;
-      const threadTs = (payload.message?.ts ?? payload.container?.message_ts) as string | undefined;
-      if (!runId || !channelId || !userId) return;
-
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected run status action channel=${channelId} user=${userId} run=${runId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      await this.sendCloudRunStatus({
+      const messageTs = (payload.message?.ts ?? payload.container?.message_ts) as string | undefined;
+      const threadTs =
+        typeof payload.message?.thread_ts === "string"
+          ? payload.message.thread_ts
+          : messageTs;
+      const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
+      if (!channelId || !userId) return;
+      this.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
+      const handled = await this.handleSharedInteractionAction({
         platform: "slack",
+        action: sharedAction,
         chatId: channelId,
         userId,
         workspaceId: teamId ?? null,
-        runId,
+        messageId: messageTs,
+        messageText,
+        threadTs,
         isDirect: channelId.startsWith("D"),
-        slackThreadTs: threadTs,
       });
-      return;
-    }
-
-    if (action.action_id === "review_session") {
-      const sessionId = typeof action.value === "string" ? action.value : null;
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      const teamId = payload.team?.id as string | undefined;
-      const ts = (payload.message?.ts ?? payload.container?.message_ts) as string | undefined;
-      const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
-      if (!sessionId || !channelId || !userId) return;
-
-      const lang = await this.resolveUserLanguage("slack", userId);
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected review action channel=${channelId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
-        return;
-      }
-
-      this.markReviewCommitDisabled(sessionId);
-      if (ts) {
-        await this.disableReviewCommitButtonsSlack({
-          channelId,
-          ts,
-          text: messageText,
-          note: t("review.started_note", this.resolveSessionLanguage(session as SessionRow)),
-        });
-      }
-
-      const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
-      await this.slack.postEphemeral({
-        channel: channelId,
-        user: userId,
-        thread_ts: threadTs,
-        text: t("session.starting_review", lang),
-      });
-      try {
-        await this.handleSessionMessage(session as SessionRow, userId, REVIEW_PROMPT);
-      } catch (e) {
-        this.logger.warn(
-          `[slack] review action failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
-        );
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          thread_ts: threadTs,
-          text: t("error.generic", lang, { message: String(e) }),
-        });
-      }
-      return;
-    }
-
-    if (action.action_id === "commit_session") {
-      const sessionId = typeof action.value === "string" ? action.value : null;
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      const teamId = payload.team?.id as string | undefined;
-      const ts = (payload.message?.ts ?? payload.container?.message_ts) as string | undefined;
-      const messageText = typeof payload.message?.text === "string" ? payload.message.text : undefined;
-      if (!sessionId || !channelId || !userId) return;
-
-      const lang = await this.resolveUserLanguage("slack", userId);
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected commit action channel=${channelId} user=${userId} session=${sessionId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", sessionId).executeTakeFirst();
-      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
-        return;
-      }
-
-      this.markReviewCommitDisabled(sessionId);
-      if (ts) await this.disableReviewCommitButtonsSlack({ channelId, ts, text: messageText });
-
-      const threadTs = this.config.slack?.session_mode === "thread" ? session.space_id : undefined;
-      const isCloudSession = typeof session.project_id === "string" && session.project_id.startsWith("cloud:");
-      if (isCloudSession && this.cloudManager && this.commitProposalStore) {
-        const identity = await getOrCreateIdentity(this.db, {
-          platform: session.platform,
-          workspaceId: session.workspace_id ?? null,
-          userId: session.created_by_user_id,
-        });
-        this.commitProposalStore.startProposal({
-          sessionId,
-          platform: "slack",
-          chatId: channelId,
-          userId,
-          spaceId: session.space_id,
-          isTelegramTopic: false,
-          gitUserName: identity.git_user_name,
-          gitUserEmail: identity.git_user_email,
-        });
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          thread_ts: threadTs,
-          text: t("commit.proposal.preparing", lang),
-        });
-        try {
-          await this.handleSessionMessage(session as SessionRow, userId, buildCommitProposalPrompt(identity.branch_name_rule));
-        } catch (e) {
-          this.logger.warn(
-            `[slack] commit proposal failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
-          );
-          await this.slack.postEphemeral({
-            channel: channelId,
-            user: userId,
-            thread_ts: threadTs,
-            text: t("error.generic", lang, { message: String(e) }),
-          });
-        }
-        return;
-      }
-
-      await this.slack.postEphemeral({
-        channel: channelId,
-        user: userId,
-        thread_ts: threadTs,
-        text: t("session.committing", lang),
-      });
-      try {
-        await this.handleSessionMessage(session as SessionRow, userId, COMMIT_PROMPT);
-      } catch (e) {
-        this.logger.warn(
-          `[slack] commit action failed channel=${channelId} user=${userId} session=${sessionId}: ${String(e)}`,
-        );
-        await this.slack.postEphemeral({
-          channel: channelId,
-          user: userId,
-          thread_ts: threadTs,
-          text: t("error.generic", lang, { message: String(e) }),
-        });
-      }
-      return;
-    }
-
-    if (action.action_id === "commit_cancel" || action.action_id === "commit_push" || action.action_id === "commit_pr") {
-      const proposalId = typeof action.value === "string" ? action.value : null;
-      const channelId = payload.channel?.id as string | undefined;
-      const userId = payload.user?.id as string | undefined;
-      const teamId = payload.team?.id as string | undefined;
-      if (!proposalId || !channelId || !userId) return;
-
-      const lang = await this.resolveUserLanguage("slack", userId);
-      const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
-      if (!access.allowed) {
-        this.logger.warn(
-          `[slack] rejected commit proposal action channel=${channelId} user=${userId} proposal=${proposalId} reason=${access.reason ?? "-"}`,
-        );
-        return;
-      }
-
-      const proposal = this.commitProposalStore?.getProposal(proposalId) ?? null;
-      if (!proposal) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("commit.proposal.expired", lang) });
-        return;
-      }
-      if (proposal.platform !== "slack" || proposal.chatId !== channelId || proposal.userId !== userId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("error.not_authorized", lang) });
-        return;
-      }
-      const session = await this.db.selectFrom("sessions").selectAll().where("id", "=", proposal.sessionId).executeTakeFirst();
-      if (!session || session.platform !== "slack" || session.chat_id !== channelId) {
-        await this.slack.postEphemeral({ channel: channelId, user: userId, text: t("session.not_found", lang) });
-        return;
-      }
-      const actionKind: CommitProposalAction =
-        action.action_id === "commit_cancel" ? "cancel" : action.action_id === "commit_push" ? "push" : "pr";
-      await this.handleCommitProposalAction({ proposal, session: session as SessionRow, action: actionKind });
-      return;
+      if (handled) return;
     }
 
     if (action.action_id !== "project_select") return;
@@ -3635,6 +3482,7 @@ export class BotController {
     const userId = payload.user?.id as string | undefined;
     const teamId = payload.team?.id as string | undefined;
     if (!projectId || !triggerId || !channelId || !userId) return;
+    this.slack.registerWorkspaceForChannel(channelId, { workspaceId: teamId ?? null });
     const lang = await this.resolveUserLanguage("slack", userId);
     const access = this.slackAccessDecision(teamId ?? null, channelId, userId);
     if (!access.allowed) {
@@ -3659,7 +3507,9 @@ export class BotController {
       updated_at: nowMs(),
     });
 
-    await this.slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null, lang }));
+    await this.slack.openModal(triggerId, this.buildSlackWizardModal({ project, channelId, userId, teamId: teamId ?? null, lang }), {
+      workspaceId: teamId ?? null,
+    });
   }
 
   private buildSlackWizardModal(opts: {
@@ -3727,9 +3577,11 @@ export class BotController {
 
     // Create session thread root.
     const lang = await this.resolveUserLanguage("slack", meta.userId);
+    this.slack.registerWorkspaceForChannel(meta.channelId, { workspaceId: meta.teamId });
     const rootTs = await this.slack.postMessage({
       channel: meta.channelId,
       text: t("session.starting", lang),
+      workspaceId: meta.teamId,
     });
     if (!rootTs) throw new Error("Failed to create Slack thread");
 
@@ -3961,6 +3813,13 @@ function parseLanguageCommandFromSlack(text: string): LanguageCommand | null {
   return { raw: tokens.join(" ").trim() };
 }
 
+function isSlackHelpCommand(text: string): boolean {
+  const normalized = normalizeCloudText(text);
+  if (!normalized) return false;
+  const trimmed = normalized.trim().toLowerCase();
+  return trimmed === "help" || trimmed === "/help";
+}
+
 type CloudCommand =
   | { kind: "connect"; provider: string; subcommand?: string; payload?: string }
   | { kind: "disconnect"; provider: string; installationId?: string; confirmToken?: string; all?: boolean }
@@ -3990,6 +3849,10 @@ type CloudCommand =
 
 function normalizeCloudText(text: string): string {
   let out = text.trim();
+  // Unwrap Slack link markup: <url|text> or <url>
+  out = out.replace(/<([^>|]+)\|[^>]+>/g, "$1").replace(/<([^>]+)>/g, "$1");
+  // Decode common HTML entities Slack may inject in URLs.
+  out = out.replace(/&amp;/g, "&");
   out = out.replace(/<@[^>]+>/g, "").trim();
   if (out.startsWith("/")) {
     const parts = out.slice(1).split(/\s+/);
@@ -4392,7 +4255,8 @@ function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage):
   notes.push(t("cloud.help.note_disconnect", lang, { cmd: `\`${cmd("disconnect github")}\`` }));
   notes.push(t("cloud.help.note_lang", lang, { cmd: `\`${cmd("lang zh")}\`` }));
   if (platform === "slack") {
-    notes.push(t("cloud.help.note_slack_mention", lang));
+    notes.push(t("cloud.help.note_slack_dm", lang));
+    notes.push(t("cloud.help.note_slack_slash", lang));
   }
   const lines = [
     title,
@@ -4457,10 +4321,10 @@ function buildCloudHelpText(platform: "telegram" | "slack", lang: UserLanguage):
 }
 
 function buildCommandExamples(platform: "telegram" | "slack", lang: UserLanguage): string {
-  const sessions = platform === "telegram" ? "/sessions active" : "@bot sessions active";
-  const sessionsPage = platform === "telegram" ? "/sessions page 2" : "@bot sessions page 2";
-  const settings = platform === "telegram" ? "/settings" : "@bot settings";
-  const prefix = platform === "telegram" ? "/" : "@bot ";
+  const sessions = platform === "telegram" ? "/sessions active" : "sessions active";
+  const sessionsPage = platform === "telegram" ? "/sessions page 2" : "sessions page 2";
+  const settings = platform === "telegram" ? "/settings" : "settings";
+  const prefix = platform === "telegram" ? "/" : "";
   const envSet = `${prefix}settings set mcp.SEARCH http://localhost:3000`;
   const envUnset = `${prefix}settings unset mcp.SEARCH`;
   return [

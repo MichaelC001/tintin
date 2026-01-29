@@ -40,8 +40,8 @@ export const zh = {
   "menu.intro": "选择一个项目来启动 {agent} 会话。",
   "menu.sessions_hint_tg": "- /sessions - 列出最近的会话（添加 'active' 过滤，'page 2' 查看更早的）",
   "menu.settings_hint_tg": "- /settings - 列出/调整运行时设置（agent + MCP）",
-  "menu.sessions_hint_slack": "- 提及我并说 \"sessions\" 来列出最近的会话（添加 \"active\" 或 \"page 2\"）",
-  "menu.settings_hint_slack": "- 提及我并说 \"settings\" 来列出/调整运行时设置（agent + MCP）",
+  "menu.sessions_hint_slack": "- `sessions` 列出最近会话（添加 \"active\" 或 \"page 2\"）",
+  "menu.settings_hint_slack": "- `settings` 列出/调整运行时设置（agent + MCP）",
   "menu.examples": "示例：",
 
   // Actions
@@ -58,6 +58,7 @@ export const zh = {
   // Errors
   "error.not_authorized": "未授权。",
   "error.generic": "错误：{message}",
+  "slack.thread_unsupported": "不支持在 Slack 线程中回复，请在主 DM 里发送命令。",
   "error.path_required": "路径是必需的。",
   "error.path_not_directory": "路径必须是一个存在的目录。",
   "error.path_not_allowed": "路径不在允许的根目录范围内。",
@@ -193,7 +194,8 @@ export const zh = {
   "cloud.help.note_group": "- 群聊中先用 {cmd} 共享仓库。",
   "cloud.help.note_disconnect": "- 使用 {cmd} 断开 GitHub App。",
   "cloud.help.note_lang": "- 使用 {cmd} 切换当前会话语言。",
-  "cloud.help.note_slack_mention": "- Slack 频道中需要 @ 机器人执行命令。",
+  "cloud.help.note_slack_dm": "- 只支持与应用 DM，频道 @ 不再支持。",
+  "cloud.help.note_slack_slash": "- Slack 中以 \"/\" 开头会被当作 Slash Command，请在 DM 中直接输入命令。",
 
   "connect.dm_only": "请在私聊中使用 {cmd}。",
   "connect.failed": "连接失败：{error}",

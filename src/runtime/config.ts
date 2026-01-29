@@ -196,14 +196,17 @@ export interface TelegramSection {
 export type SlackSessionMode = "thread" | "channel";
 
 export interface SlackSection {
-  enabled: boolean;
-  bot_token: string;
+  client_id: string;
+  client_secret: string;
+  state_secret: string;
   signing_secret: string;
   events_path: string;
   interactions_path: string;
-  session_mode: SlackSessionMode;
   max_chars: number;
   rate_limit_msgs_per_sec: number;
+  message_queue_interval_ms: number;
+  scopes: string[];
+  user_scopes: string[];
 }
 
 export type PlaywrightSnapshotMode = "incremental" | "full" | "none";
@@ -1144,27 +1147,41 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
   if (resolved.slack !== undefined) {
     const s = resolved.slack;
     assert(isRecord(s), "[slack] must be a table");
-    const enabled = typeof s.enabled === "boolean" ? s.enabled : true;
-    const mode = typeof s.session_mode === "string" ? s.session_mode : "thread";
-    assert(mode === "thread" || mode === "channel", "[slack].session_mode must be 'thread' or 'channel'");
+    const scopesRaw = Array.isArray((s as any).scopes)
+      ? (s as any).scopes
+      : typeof (s as any).scopes === "string"
+        ? [(s as any).scopes]
+        : [];
+    const scopes = scopesRaw.filter((v: unknown): v is string => typeof v === "string" && v.trim().length > 0);
+    const userScopesRaw = Array.isArray((s as any).user_scopes)
+      ? (s as any).user_scopes
+      : typeof (s as any).user_scopes === "string"
+        ? [(s as any).user_scopes]
+        : [];
+    const userScopes = userScopesRaw.filter((v: unknown): v is string => typeof v === "string" && v.trim().length > 0);
     slackSection = {
-      enabled,
-      bot_token: typeof s.bot_token === "string" ? s.bot_token : "",
+      client_id: typeof (s as any).client_id === "string" ? (s as any).client_id : "",
+      client_secret: typeof (s as any).client_secret === "string" ? (s as any).client_secret : "",
+      state_secret: typeof (s as any).state_secret === "string" ? (s as any).state_secret : "",
       signing_secret: typeof s.signing_secret === "string" ? s.signing_secret : "",
       events_path: normalizeHttpPath(typeof s.events_path === "string" ? s.events_path : "/slack/events", "[slack].events_path"),
       interactions_path: normalizeHttpPath(
         typeof s.interactions_path === "string" ? s.interactions_path : "/slack/interactions",
         "[slack].interactions_path",
       ),
-      session_mode: mode,
       max_chars: typeof s.max_chars === "number" ? s.max_chars : 3000,
       rate_limit_msgs_per_sec: typeof s.rate_limit_msgs_per_sec === "number" ? s.rate_limit_msgs_per_sec : 1.0,
+      message_queue_interval_ms:
+        typeof (s as any).message_queue_interval_ms === "number" ? (s as any).message_queue_interval_ms : 1000,
+      scopes,
+      user_scopes: userScopes,
     };
-    // Only validate required fields when enabled
-    if (slackSection.enabled) {
-      assert(slackSection.bot_token.length > 0, "[slack].bot_token is required when enabled");
-      assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required when enabled");
-    }
+    assert(slackSection.client_id.length > 0, "[slack].client_id is required");
+    assert(slackSection.client_secret.length > 0, "[slack].client_secret is required");
+    assert(slackSection.state_secret.length > 0, "[slack].state_secret is required");
+    assert(slackSection.signing_secret.length > 0, "[slack].signing_secret is required");
+    assert(slackSection.scopes.length > 0, "[slack].scopes must include at least one scope");
+    assert(slackSection.message_queue_interval_ms >= 0, "[slack].message_queue_interval_ms must be >= 0");
   }
 
   const playwrightMcp = normalizePlaywrightMcpSection((resolved as any).playwright_mcp, {
@@ -1187,10 +1204,13 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
     cloud.proxy.openai_base_url = normalizeUrl(cloud.proxy.openai_base_url, "[cloud].proxy.openai_base_url");
     cloud.proxy.anthropic_base_url = normalizeUrl(cloud.proxy.anthropic_base_url, "[cloud].proxy.anthropic_base_url");
   }
+  if (slackSection) {
+    assert(cloud?.public_base_url && cloud.public_base_url.length > 0, "[cloud].public_base_url is required when slack is enabled");
+  }
 
   // At least one platform/interface must be enabled
   const telegramEnabled = telegramSection?.enabled ?? false;
-  const slackEnabled = slackSection?.enabled ?? false;
+  const slackEnabled = !!slackSection;
   const websocketEnabled = websocket?.enabled ?? false;
   assert(
     telegramEnabled || slackEnabled || websocketEnabled,
