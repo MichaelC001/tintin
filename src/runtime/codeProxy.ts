@@ -6,37 +6,37 @@
  * 2. Stripping X-Frame-Options and CSP headers from responses
  * 3. Handling WebSocket upgrade for code-server's real-time features
  */
-
-import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Duplex } from 'node:stream';
-import { WebSocket } from 'ws';
-import type { Logger } from './log.js';
-import type { CloudManager } from './cloud/manager.js';
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Duplex } from "node:stream";
+import { WebSocket, WebSocketServer } from "ws";
+import type { CloudManager } from "./cloud/manager.js";
+import type { Logger } from "./log.js";
 
 /** Headers to strip from proxied responses to allow iframe embedding */
 const STRIP_RESPONSE_HEADERS = [
-  'x-frame-options',
-  'content-security-policy',
-  'x-content-type-options',
-  'content-encoding',    // fetch() auto-decompresses, so body is already uncompressed
-  'content-length',      // Length changes after decompression, let Node.js handle it
-  'transfer-encoding',   // Avoid chunked encoding conflicts with our streaming
+  "x-frame-options",
+  "content-security-policy",
+  "x-content-type-options",
+  "content-encoding", // fetch() auto-decompresses, so body is already uncompressed
+  "content-length", // Length changes after decompression, let Node.js handle it
+  "transfer-encoding", // Avoid chunked encoding conflicts with our streaming
 ];
 
 /** Headers to not forward from client to upstream */
 const SKIP_REQUEST_HEADERS = new Set([
-  'host',
-  'connection',
-  'upgrade',
-  'sec-websocket-key',
-  'sec-websocket-version',
-  'sec-websocket-extensions',
-  'sec-websocket-protocol',
+  "host",
+  "connection",
+  "upgrade",
+  "sec-websocket-key",
+  "sec-websocket-version",
+  "sec-websocket-extensions",
+  "sec-websocket-protocol",
 ]);
 
 /** HTTP status codes */
 const HTTP_SERVICE_UNAVAILABLE = 503;
 const HTTP_BAD_GATEWAY = 502;
+const HTTP_INTERNAL_ERROR = 500;
 
 /**
  * CodeProxyHandler handles HTTP and WebSocket proxying to code-server.
@@ -45,10 +45,15 @@ const HTTP_BAD_GATEWAY = 502;
  * Follows DIP: Dependencies (CloudManager, Logger) injected via constructor.
  */
 export class CodeProxyHandler {
+  private readonly wss: WebSocketServer;
+
   constructor(
     private readonly cloudManager: CloudManager,
     private readonly logger: Logger,
-  ) {}
+  ) {
+    // Create noServer mode WebSocketServer for manual upgrade handling
+    this.wss = new WebSocketServer({ noServer: true });
+  }
 
   /**
    * Handle HTTP proxy request to code-server.
@@ -67,15 +72,15 @@ export class CodeProxyHandler {
     try {
       const tunnelUrl = await this.cloudManager.getVscodeUrl(sessionId);
       if (!tunnelUrl) {
-        this.sendError(res, HTTP_SERVICE_UNAVAILABLE, 'Code server not available');
+        this.sendError(res, HTTP_SERVICE_UNAVAILABLE, "Code server not available");
         return;
       }
 
       // Build target URL
-      const targetUrl = new URL(pathSuffix || '/', tunnelUrl);
+      const targetUrl = new URL(pathSuffix || "/", tunnelUrl);
 
       // Copy query params from original request
-      const originalUrl = new URL(req.url || '/', `http://localhost`);
+      const originalUrl = new URL(req.url || "/", `http://localhost`);
       targetUrl.search = originalUrl.search;
 
       // Build headers for upstream request
@@ -85,23 +90,24 @@ export class CodeProxyHandler {
       const fetchOptions: RequestInit & { duplex?: string } = {
         method: req.method,
         headers,
-        redirect: 'manual', // Handle redirects manually to rewrite Location headers
+        redirect: "manual", // Handle redirects manually to rewrite Location headers
       };
 
       // Forward request body for non-GET/HEAD methods
-      if (req.method !== 'GET' && req.method !== 'HEAD') {
-        fetchOptions.body = req as unknown as ReadableStream;
-        fetchOptions.duplex = 'half';
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        fetchOptions.body = req as any;
+        fetchOptions.duplex = "half";
       }
 
       const proxyRes = await fetch(targetUrl.toString(), fetchOptions);
 
       // Handle redirects - rewrite Location header to proxy URL
       if (proxyRes.status >= 300 && proxyRes.status < 400) {
-        const location = proxyRes.headers.get('location');
+        const location = proxyRes.headers.get("location");
         if (location) {
           const rewrittenLocation = this.rewriteLocationHeader(location, tunnelUrl, sessionId);
-          res.setHeader('location', rewrittenLocation);
+          res.setHeader("location", rewrittenLocation);
         }
       }
 
@@ -132,13 +138,17 @@ export class CodeProxyHandler {
     } catch (err) {
       this.logger.warn(`[code-proxy] request failed session=${sessionId}: ${String(err)}`);
       if (!res.headersSent) {
-        this.sendError(res, HTTP_BAD_GATEWAY, 'Proxy request failed');
+        this.sendError(res, HTTP_BAD_GATEWAY, "Proxy request failed");
       }
     }
   }
 
   /**
    * Handle WebSocket upgrade for code-server.
+   *
+   * Uses WebSocketServer.handleUpgrade() to properly upgrade the client connection,
+   * ensuring both client and upstream are proper WebSocket objects with correct
+   * frame encoding/decoding.
    *
    * @param sessionId - The session ID to get the tunnel URL for
    * @param req - Incoming HTTP request
@@ -157,101 +167,120 @@ export class CodeProxyHandler {
       const tunnelUrl = await this.cloudManager.getVscodeUrl(sessionId);
       if (!tunnelUrl) {
         this.logger.debug(`[code-proxy] ws upgrade failed: no tunnel url session=${sessionId}`);
-        clientSocket.destroy();
+        this.sendUpgradeError(clientSocket, HTTP_SERVICE_UNAVAILABLE, "Code server not available");
         return;
       }
 
-      // Convert HTTP URL to WebSocket URL
-      const wsUrl = tunnelUrl.replace(/^http/, 'ws');
-      const targetUrl = new URL(pathSuffix || '/', wsUrl);
-
-      // Copy query params
-      const originalUrl = new URL(req.url || '/', `http://localhost`);
-      targetUrl.search = originalUrl.search;
-
-      // Build headers for upstream
-      const headers = this.buildWebSocketHeaders(req, tunnelUrl);
-
-      // Connect to upstream WebSocket
-      const upstreamWs = new WebSocket(targetUrl.toString(), {
-        headers,
-        handshakeTimeout: 10000,
-      });
-
-      // Track if connection is established
-      let connected = false;
-
-      upstreamWs.on('open', () => {
-        connected = true;
-        this.logger.debug(`[code-proxy] ws connected session=${sessionId}`);
-
-        // Send upgrade response to client
-        const upgradeResponse = [
-          'HTTP/1.1 101 Switching Protocols',
-          'Upgrade: websocket',
-          'Connection: Upgrade',
-          `Sec-WebSocket-Accept: ${this.computeAcceptKey(req.headers['sec-websocket-key'] as string)}`,
-        ];
-
-        // Add subprotocol if present
-        const protocol = req.headers['sec-websocket-protocol'];
-        if (protocol) {
-          upgradeResponse.push(`Sec-WebSocket-Protocol: ${Array.isArray(protocol) ? protocol[0] : protocol}`);
-        }
-
-        upgradeResponse.push('', '');
-        clientSocket.write(upgradeResponse.join('\r\n'));
-
-        // If there's buffered data, send it
-        if (head.length > 0) {
-          upstreamWs.send(head);
-        }
-      });
-
-      // Forward data from client to upstream
-      clientSocket.on('data', (data: Buffer) => {
-        if (upstreamWs.readyState === WebSocket.OPEN) {
-          upstreamWs.send(data);
-        }
-      });
-
-      // Forward data from upstream to client
-      upstreamWs.on('message', (data: Buffer) => {
-        if (!clientSocket.destroyed) {
-          clientSocket.write(data);
-        }
-      });
-
-      // Handle close events
-      clientSocket.on('close', () => {
-        if (upstreamWs.readyState !== WebSocket.CLOSED) {
-          upstreamWs.close();
-        }
-      });
-
-      clientSocket.on('error', (err) => {
-        this.logger.debug(`[code-proxy] client socket error session=${sessionId}: ${String(err)}`);
-        if (upstreamWs.readyState !== WebSocket.CLOSED) {
-          upstreamWs.close();
-        }
-      });
-
-      upstreamWs.on('close', () => {
-        if (!clientSocket.destroyed) {
-          clientSocket.destroy();
-        }
-      });
-
-      upstreamWs.on('error', (err) => {
-        this.logger.debug(`[code-proxy] upstream ws error session=${sessionId}: ${String(err)}`);
-        if (!connected) {
-          clientSocket.destroy();
-        }
+      // Use wss.handleUpgrade to properly upgrade client connection
+      this.wss.handleUpgrade(req, clientSocket, head, (clientWs) => {
+        this.proxyWebSocket(sessionId, clientWs, tunnelUrl, pathSuffix, req);
       });
     } catch (err) {
       this.logger.warn(`[code-proxy] ws upgrade error session=${sessionId}: ${String(err)}`);
-      clientSocket.destroy();
+      this.sendUpgradeError(clientSocket, HTTP_INTERNAL_ERROR, "Internal server error");
     }
+  }
+
+  /**
+   * Proxy WebSocket messages between client and upstream.
+   *
+   * Both clientWs and upstreamWs are proper WebSocket objects, so message
+   * framing is handled correctly by the ws library.
+   */
+  private proxyWebSocket(
+    sessionId: string,
+    clientWs: WebSocket,
+    tunnelUrl: string,
+    pathSuffix: string,
+    req: IncomingMessage,
+  ): void {
+    // Build upstream WebSocket URL
+    const wsUrl = tunnelUrl.replace(/^http/, "ws");
+    const targetUrl = new URL(pathSuffix || "/", wsUrl);
+    const originalUrl = new URL(req.url || "/", "http://localhost");
+    targetUrl.search = originalUrl.search;
+
+    const headers = this.buildWebSocketHeaders(req, tunnelUrl);
+
+    const upstreamWs = new WebSocket(targetUrl.toString(), {
+      headers,
+      handshakeTimeout: 10000,
+    });
+
+    let upstreamConnected = false;
+
+    upstreamWs.on("open", () => {
+      upstreamConnected = true;
+      this.logger.debug(`[code-proxy] ws connected session=${sessionId}`);
+    });
+
+    // Bidirectional message forwarding
+    clientWs.on("message", (data, isBinary) => {
+      if (upstreamWs.readyState === WebSocket.OPEN) {
+        upstreamWs.send(data, { binary: isBinary });
+      }
+    });
+
+    upstreamWs.on("message", (data, isBinary) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.send(data, { binary: isBinary });
+      }
+    });
+
+    // Close event handling
+    clientWs.on("close", (code, reason) => {
+      this.logger.debug(`[code-proxy] client ws closed session=${sessionId} code=${code}`);
+      if (upstreamWs.readyState !== WebSocket.CLOSED) {
+        upstreamWs.close(code, reason);
+      }
+    });
+
+    upstreamWs.on("close", (code, reason) => {
+      this.logger.debug(`[code-proxy] upstream ws closed session=${sessionId} code=${code}`);
+      if (clientWs.readyState !== WebSocket.CLOSED) {
+        clientWs.close(code, reason);
+      }
+    });
+
+    // Error handling
+    clientWs.on("error", (err) => {
+      this.logger.debug(`[code-proxy] client ws error session=${sessionId}: ${String(err)}`);
+      if (upstreamWs.readyState !== WebSocket.CLOSED) {
+        upstreamWs.close();
+      }
+    });
+
+    upstreamWs.on("error", (err) => {
+      this.logger.debug(`[code-proxy] upstream ws error session=${sessionId}: ${String(err)}`);
+      if (!upstreamConnected && clientWs.readyState === WebSocket.OPEN) {
+        clientWs.close(1011, "Upstream connection failed");
+      }
+    });
+
+    // Ping/Pong forwarding for connection keepalive
+    clientWs.on("ping", (data) => {
+      if (upstreamWs.readyState === WebSocket.OPEN) {
+        upstreamWs.ping(data);
+      }
+    });
+
+    upstreamWs.on("ping", (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.ping(data);
+      }
+    });
+
+    clientWs.on("pong", (data) => {
+      if (upstreamWs.readyState === WebSocket.OPEN) {
+        upstreamWs.pong(data);
+      }
+    });
+
+    upstreamWs.on("pong", (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.pong(data);
+      }
+    });
   }
 
   /**
@@ -264,19 +293,16 @@ export class CodeProxyHandler {
     for (const [key, value] of Object.entries(req.headers)) {
       const lowerKey = key.toLowerCase();
       if (SKIP_REQUEST_HEADERS.has(lowerKey)) continue;
-
-      if (lowerKey === 'host') {
+      if (lowerKey === "host") {
         headers[key] = targetHost;
-      } else if (typeof value === 'string') {
+      } else if (typeof value === "string") {
         headers[key] = value;
       } else if (Array.isArray(value)) {
-        headers[key] = value.join(', ');
+        headers[key] = value.join(", ");
       }
     }
-
     // Ensure host is set
-    headers['host'] = targetHost;
-
+    headers["host"] = targetHost;
     return headers;
   }
 
@@ -291,18 +317,16 @@ export class CodeProxyHandler {
       const lowerKey = key.toLowerCase();
       // Skip WebSocket-specific headers that ws will set
       if (SKIP_REQUEST_HEADERS.has(lowerKey)) continue;
-      if (lowerKey === 'host') continue;
+      if (lowerKey === "host") continue;
 
-      if (typeof value === 'string') {
+      if (typeof value === "string") {
         headers[key] = value;
       } else if (Array.isArray(value)) {
-        headers[key] = value.join(', ');
+        headers[key] = value.join(", ");
       }
     }
-
-    headers['host'] = targetHost;
-    headers['origin'] = tunnelUrl;
-
+    headers["host"] = targetHost;
+    headers["origin"] = tunnelUrl;
     return headers;
   }
 
@@ -313,7 +337,6 @@ export class CodeProxyHandler {
     try {
       const locUrl = new URL(location, tunnelUrl);
       const tunnelHost = new URL(tunnelUrl).host;
-
       // If redirect is to the same host, rewrite to proxy
       if (locUrl.host === tunnelHost) {
         return `/api/code-proxy/${sessionId}${locUrl.pathname}${locUrl.search}`;
@@ -325,15 +348,18 @@ export class CodeProxyHandler {
   }
 
   /**
-   * Compute Sec-WebSocket-Accept key per RFC 6455.
+   * Send HTTP error response for failed WebSocket upgrade.
    */
-  private computeAcceptKey(clientKey: string): string {
-    const crypto = require('node:crypto');
-    const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
-    return crypto
-      .createHash('sha1')
-      .update(clientKey + GUID)
-      .digest('base64');
+  private sendUpgradeError(socket: Duplex, status: number, message: string): void {
+    const response = [
+      `HTTP/1.1 ${status} ${message}`,
+      "Content-Type: text/plain",
+      "Connection: close",
+      "",
+      message,
+    ].join("\r\n");
+    socket.write(response);
+    socket.destroy();
   }
 
   /**
@@ -341,7 +367,7 @@ export class CodeProxyHandler {
    */
   private sendError(res: ServerResponse, status: number, message: string): void {
     res.statusCode = status;
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.end(JSON.stringify({ error: message }));
   }
 }
