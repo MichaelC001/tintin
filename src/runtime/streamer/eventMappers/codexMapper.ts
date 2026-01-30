@@ -170,21 +170,23 @@ export function mapCodexEventToFragments(
         const base = cmd
           ? t("streamer.command_completed_with", lang, { command: commandLabel })
           : t("streamer.command_completed", lang);
-        return [{ kind: "text", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim() }];
+        return [{ kind: "tool_output", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim(), toolName: "command", formatAsCode: false }];
       }
       if (status === "failed") {
         return [
           {
-            kind: "text",
+            kind: "tool_output",
             text: cmd
               ? t("streamer.command_failed_with", lang, { command: commandLabel })
               : t("streamer.command_failed", lang),
+            toolName: "command",
+            formatAsCode: false,
           },
         ];
       }
       return cmd
-        ? [{ kind: "text", text: t("streamer.command_completed_with", lang, { command: commandLabel }) }]
-        : [{ kind: "text", text: t("streamer.command_completed", lang) }];
+        ? [{ kind: "tool_output", text: t("streamer.command_completed_with", lang, { command: commandLabel }), toolName: "command", formatAsCode: false }]
+        : [{ kind: "tool_output", text: t("streamer.command_completed", lang), toolName: "command", formatAsCode: false }];
     }
     if (detailsType === "mcp_tool_call") {
       if (!includeTools) return [];
@@ -210,7 +212,7 @@ export function mapCodexEventToFragments(
       if (!body && (item as { result?: unknown }).result !== undefined) {
         body = truncateJson((item as { result?: unknown }).result, 800);
       }
-      if (!body) return [{ kind: "text", text: t("streamer.tool_completed", lang, { tool: toolLabel }) }];
+      if (!body) return [{ kind: "tool_output", text: t("streamer.tool_completed", lang, { tool: toolLabel }), toolName: label || "mcp", formatAsCode: false }];
       return [{ kind: "tool_output", text: truncateLogLine(body, 4000) }];
     }
     if (detailsType === "file_change") {

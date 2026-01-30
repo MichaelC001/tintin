@@ -40,6 +40,7 @@ export type SessionMessage =
       name: string;
       output: string;
       callText?: string;
+      formatAsCode?: boolean;
       priority?: "user" | "background";
     };
 

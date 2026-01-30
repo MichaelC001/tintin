@@ -1553,14 +1553,21 @@ export async function createBotService(deps: BotServiceDeps) {
     }
     // tool_output: format as text for TG/Slack, then send via existing text handling
     if (message.type === "tool_output") {
-      const maxChars = config.telegram?.max_chars ?? config.slack?.max_chars ?? 3500;
-      const formattedText = formatToolPairMessage({
-        callText: message.callText ?? null,
-        outputText: message.output,
-        maxMessageChars: maxChars,
-      });
-      // Recursively call with formatted text to use existing TG/Slack text send logic
-      await sendToSession(sessionId, { text: formattedText, priority: message.priority });
+      const shouldFormatAsCode = message.formatAsCode !== false;
+      if (shouldFormatAsCode) {
+        // Has actual output → wrap in code block
+        const maxChars = config.telegram?.max_chars ?? config.slack?.max_chars ?? 3500;
+        const formattedText = formatToolPairMessage({
+          callText: message.callText ?? null,
+          outputText: message.output,
+          maxMessageChars: maxChars,
+        });
+        // Recursively call with formatted text to use existing TG/Slack text send logic
+        await sendToSession(sessionId, { text: formattedText, priority: message.priority });
+      } else {
+        // Status message → plain text (no code block)
+        await sendToSession(sessionId, { text: message.output, priority: message.priority });
+      }
       return;
     }
     const text = message.text;

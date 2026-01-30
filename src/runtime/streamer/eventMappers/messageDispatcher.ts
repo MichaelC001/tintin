@@ -165,8 +165,8 @@ export function mapEventMsgPayload(
         ? t("streamer.command_completed_with", lang, { command: commandLabel })
         : t("streamer.command_completed", lang);
       const summary = `${base}${status}`;
-      if (suffix) return text(`${summary}: ${suffix}`);
-      return text(summary);
+      const outputText = suffix ? `${summary}: ${suffix}` : summary;
+      return [{ kind: "tool_output", text: outputText, toolName: "command", formatAsCode: false }];
     }
     case "view_image_tool_call": {
       if (!includeTools) return [];

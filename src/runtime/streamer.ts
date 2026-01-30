@@ -31,7 +31,7 @@ export type MessageVerbosity = 1 | 2 | 3;
 export type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
   | { kind: "tool_call"; text: string; toolName?: string; toolInput?: string }
-  | { kind: "tool_output"; text: string }
+  | { kind: "tool_output"; text: string; toolName?: string; formatAsCode?: boolean }
   | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
   | { kind: "final" };
 
@@ -282,9 +282,10 @@ export class JsonlStreamer {
             // Send structured tool_output message; service.ts handles platform-specific formatting
             await this.sendToSession(session.id, {
               type: "tool_output",
-              name: pending?.toolName ?? "unknown",
+              name: frag.toolName ?? pending?.toolName ?? "unknown",
               output: frag.text,
               callText: pending?.text,
+              formatAsCode: frag.formatAsCode ?? true,
               priority: this.takeSendPriority(session.id),
             });
           }
@@ -1066,21 +1067,23 @@ function mapCodexEventToFragments(
         const base = cmd
           ? t("streamer.command_completed_with", lang, { command: commandLabel })
           : t("streamer.command_completed", lang);
-        return [{ kind: "text", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim() }];
+        return [{ kind: "tool_output", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim(), toolName: "command", formatAsCode: false }];
       }
       if (status === "failed") {
         return [
           {
-            kind: "text",
+            kind: "tool_output",
             text: cmd
               ? t("streamer.command_failed_with", lang, { command: commandLabel })
               : t("streamer.command_failed", lang),
+            toolName: "command",
+            formatAsCode: false,
           },
         ];
       }
       return cmd
-        ? [{ kind: "text", text: t("streamer.command_completed_with", lang, { command: commandLabel }) }]
-        : [{ kind: "text", text: t("streamer.command_completed", lang) }];
+        ? [{ kind: "tool_output", text: t("streamer.command_completed_with", lang, { command: commandLabel }), toolName: "command", formatAsCode: false }]
+        : [{ kind: "tool_output", text: t("streamer.command_completed", lang), toolName: "command", formatAsCode: false }];
     }
     if (detailsType === "mcp_tool_call") {
       if (!includeTools) return [];
@@ -1105,8 +1108,8 @@ function mapCodexEventToFragments(
       if (!body && (item as { result?: unknown }).result !== undefined) {
         body = truncateJson((item as { result?: unknown }).result, 800);
       }
-      if (!body) return [{ kind: "text", text: t("streamer.tool_completed", lang, { tool: toolLabel }) }];
-      return [{ kind: "tool_output", text: truncateLogLine(body, 4000) }];
+      if (!body) return [{ kind: "tool_output", text: t("streamer.tool_completed", lang, { tool: toolLabel }), toolName: label || "mcp", formatAsCode: false }];
+      return [{ kind: "tool_output", text: truncateLogLine(body, 4000), toolName: label || "mcp" }];
     }
     if (detailsType === "file_change") {
       if (!includeEvents) return [];
