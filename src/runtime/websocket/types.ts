@@ -66,6 +66,7 @@ export interface CloudRunMessage {
   repoIds?: string[];              // repo IDs (empty array = playground mode)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
+  language?: string;               // optional, language code (e.g., 'en', 'zh')
   restoreSnapshotId?: string;      // optional, restore from specified snapshot
   autoRestore?: boolean;           // optional, auto-restore from latest snapshot
   lastRunId?: string;              // optional, restore from specific run's snapshot
