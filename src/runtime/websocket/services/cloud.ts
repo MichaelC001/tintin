@@ -217,11 +217,13 @@ export class CloudRunService {
 
       // Send browser session CDP URL if available
       if (cdpUrl) {
+        const liveViewUrl = this.cloudManager.getLiveViewUrl(sessionId);
         this.wsManager.sendToConnection(connId, {
           type: 'browser_session',
           sessionId,
           runId,
           cdpUrl,
+          liveViewUrl: liveViewUrl ?? undefined,
           provider: 'hyperbrowser',
         });
       }

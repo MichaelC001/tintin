@@ -227,6 +227,7 @@ export interface BrowserSessionMessage {
   sessionId: string;
   runId: string;
   cdpUrl: string;
+  liveViewUrl?: string;
   provider: BrowserProvider;
 }
 

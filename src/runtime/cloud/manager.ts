@@ -122,6 +122,7 @@ type BrowserbaseSessionState = {
 type HyperbrowserSessionState = {
   hyperbrowserSessionId: string;
   wsEndpoint: string;
+  liveViewUrl: string | null;
   port: number;
 };
 
@@ -1829,7 +1830,7 @@ export class CloudManager {
       await this.releaseHyperbrowserForSession(opts.sessionId, "replaced");
     }
 
-    let created: { id: string; wsEndpoint: string } | null = null;
+    let created: { id: string; wsEndpoint: string; liveUrl: string | null } | null = null;
     try {
       created = await createHyperbrowserSession({ config: hyperbrowser });
       const port = this.pickRemoteMcpPort(mcp);
@@ -1844,6 +1845,7 @@ export class CloudManager {
       this.hyperbrowserSessions.set(opts.sessionId, {
         hyperbrowserSessionId: created.id,
         wsEndpoint: created.wsEndpoint,
+        liveViewUrl: created.liveUrl,
         port,
       });
       await updateSession(this.db, opts.sessionId, { hyperbrowser_session_id: created.id });
@@ -1993,6 +1995,13 @@ export class CloudManager {
         `[cloud][browserbase] release failed tintin_session=${sessionId} browserbase_session=${entry.browserbaseSessionId} reason=${reason}: ${String(e)}`,
       );
     }
+  }
+
+  /**
+   * Get the Live View URL for a session (for iframe embedding).
+   */
+  getLiveViewUrl(sessionId: string): string | null {
+    return this.hyperbrowserSessions.get(sessionId)?.liveViewUrl ?? null;
   }
 
   private async releaseHyperbrowserForSession(sessionId: string, reason: string): Promise<void> {

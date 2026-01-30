@@ -53,6 +53,7 @@ interface MockCloudManagerOptions {
   result?: Partial<StartRunResult>;
   detectLatestSnapshotResult?: string | null;
   startRunCapture?: Array<{ restoreSnapshotId: string | null }>;
+  liveViewUrl?: string | null;
 }
 
 function createMockCloudManager(options: MockCloudManagerOptions = {}) {
@@ -71,6 +72,12 @@ function createMockCloudManager(options: MockCloudManagerOptions = {}) {
       return defaultResult;
     },
     detectLatestSnapshot: async () => options.detectLatestSnapshotResult ?? null,
+    getLiveViewUrl: (sessionId: string) => {
+      if (sessionId === defaultResult.sessionId) {
+        return options.liveViewUrl ?? null;
+      }
+      return null;
+    },
     _getStartRunCaptures: () => startRunCapture,
   } as unknown as CloudManager & {
     _getStartRunCaptures: () => Array<{ restoreSnapshotId: string | null }>;
@@ -227,6 +234,78 @@ test("CloudRunService handleCloudRun", async (t) => {
       sessionStartedIndex < browserSessionIndex,
       "session_started should come before browser_session",
     );
+  });
+
+  await t.test("should include liveViewUrl in browser_session message when available", async () => {
+    const wsManager = createMockWsManager();
+    const cloudManager = createMockCloudManager({
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      },
+      liveViewUrl: "https://app.hyperbrowser.ai/live?token=abc123",
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Test prompt",
+      repoIds: [],
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const sentMessages = wsManager._getSentMessages();
+    const browserSessionMsg = sentMessages.find((m) => m.message.type === "browser_session");
+
+    assert.ok(browserSessionMsg, "browser_session message should be sent");
+
+    const msg = browserSessionMsg.message;
+    assert.equal(msg.type, "browser_session");
+    if (msg.type === "browser_session") {
+      assert.equal(msg.liveViewUrl, "https://app.hyperbrowser.ai/live?token=abc123");
+    }
+  });
+
+  await t.test("should not include liveViewUrl when not available", async () => {
+    const wsManager = createMockWsManager();
+    const cloudManager = createMockCloudManager({
+      result: {
+        runId: "run-abc",
+        sessionId: "session-xyz",
+        cdpUrl: "wss://hyperbrowser.example.com/cdp/123",
+      },
+      liveViewUrl: null,
+    });
+    const db = createMockDb();
+    const config = createMockConfig();
+    const logger = createMockLogger();
+
+    const service = new CloudRunService(wsManager, cloudManager, config, db, logger);
+
+    const message: CloudRunMessage = {
+      type: "cloud_run",
+      prompt: "Test prompt",
+      repoIds: [],
+    };
+
+    await service.handleCloudRun("conn-1", createMockConnection(), message);
+
+    const sentMessages = wsManager._getSentMessages();
+    const browserSessionMsg = sentMessages.find((m) => m.message.type === "browser_session");
+
+    assert.ok(browserSessionMsg, "browser_session message should be sent");
+
+    const msg = browserSessionMsg.message;
+    assert.equal(msg.type, "browser_session");
+    if (msg.type === "browser_session") {
+      assert.equal(msg.liveViewUrl, undefined, "liveViewUrl should be undefined when not available");
+    }
   });
 
   await t.test("should return error when prompt is empty", async () => {
