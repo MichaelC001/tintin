@@ -1,6 +1,14 @@
 import type { UserLanguage } from "../../locales/index.js";
 
 /**
+ * A pending tool call waiting for its output.
+ */
+export interface PendingToolCall {
+  text: string;
+  toolName: string;
+}
+
+/**
  * A fragment of streamed output from an agent session.
  */
 export type StreamFragment =

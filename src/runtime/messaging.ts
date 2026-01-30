@@ -34,6 +34,13 @@ export type SessionMessage =
       name: string;
       input?: string;
       priority?: "user" | "background";
+    }
+  | {
+      type: "tool_output";
+      name: string;
+      output: string;
+      callText?: string;
+      priority?: "user" | "background";
     };
 
 export type SendToSessionFn = (sessionId: string, message: SessionMessage) => Promise<void>;

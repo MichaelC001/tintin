@@ -23,7 +23,7 @@ import {
 import { handleProxyRequest, createProxyToken } from "./cloud/proxy.js";
 import { completeChatgptOAuth, isAllowedRedirectHost } from "./chatgpt/oauth.js";
 import { purgeExpiredChatgptStates } from "./chatgpt/store.js";
-import { JsonlStreamer, mapEventToFragments } from "./streamer.js";
+import { JsonlStreamer, mapEventToFragments, formatToolPairMessage } from "./streamer.js";
 import { SessionManager } from "./sessionManager.js";
 import type { SendToSessionFn, SessionMessage } from "./messaging.js";
 import type { TelegramMessage } from "./platform/telegram.js";
@@ -1477,6 +1477,14 @@ export async function createBotService(deps: BotServiceDeps) {
           name: message.name,
           input: message.input,
         };
+      } else if (message.type === "tool_output") {
+        // Send structured tool_output to WebSocket subscribers
+        wsMessage = {
+          type: 'tool_output',
+          sessionId,
+          name: message.name,
+          output: message.output,
+        };
       } else if (typeof message.text === "string") {
         wsMessage = { type: 'chunk', sessionId, content: message.text };
         if (message.final) {
@@ -1539,8 +1547,20 @@ export async function createBotService(deps: BotServiceDeps) {
       await sendToSession(sessionId, { text: `${caption}\n${t("image.saved_at", lang, { path: message.path })}`, priority: "user" });
       return;
     }
-    // tool_call messages are WebSocket-only; TG/Slack receive formatted tool output via the paired message
+    // tool_call messages are WebSocket-only; TG/Slack receive formatted tool output via tool_output message
     if (message.type === "tool_call") {
+      return;
+    }
+    // tool_output: format as text for TG/Slack, then send via existing text handling
+    if (message.type === "tool_output") {
+      const maxChars = config.telegram?.max_chars ?? config.slack?.max_chars ?? 3500;
+      const formattedText = formatToolPairMessage({
+        callText: message.callText ?? null,
+        outputText: message.output,
+        maxMessageChars: maxChars,
+      });
+      // Recursively call with formatted text to use existing TG/Slack text send logic
+      await sendToSession(sessionId, { text: formattedText, priority: message.priority });
       return;
     }
     const text = message.text;

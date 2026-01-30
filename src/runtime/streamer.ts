@@ -21,6 +21,11 @@ interface BufferState {
   lastFlushMs: number;
 }
 
+interface PendingToolCall {
+  text: string;
+  toolName: string;
+}
+
 export type MessageVerbosity = 1 | 2 | 3;
 
 export type StreamFragment =
@@ -36,7 +41,7 @@ const MAX_DEBUG_EVENT_CHARS = 2000;
 
 export class JsonlStreamer {
   private readonly buffers = new Map<string, BufferState>();
-  private readonly pendingToolCalls = new Map<string, string[]>();
+  private readonly pendingToolCalls = new Map<string, PendingToolCall[]>();
   private readonly planCallIds = new Map<string, Set<string>>();
   private readonly playwrightCallIds = new Map<string, Map<string, string>>();
   private readonly playwrightCapturedCallIds = new Map<string, Set<string>>();
@@ -254,7 +259,7 @@ export class JsonlStreamer {
 
           if (frag.kind === "tool_call") {
             const q = this.pendingToolCalls.get(session.id) ?? [];
-            q.push(frag.text);
+            q.push({ text: frag.text, toolName: frag.toolName ?? "unknown" });
             this.pendingToolCalls.set(session.id, q);
             // Send tool_call event to WebSocket subscribers for real-time updates
             if (frag.toolName) {
@@ -270,17 +275,18 @@ export class JsonlStreamer {
 
           if (frag.kind === "tool_output") {
             const q = this.pendingToolCalls.get(session.id);
-            const callText = q && q.length > 0 ? q.shift()! : null;
+            const pending = q && q.length > 0 ? q.shift()! : null;
             if (q && q.length === 0) this.pendingToolCalls.delete(session.id);
 
             await this.flushIfNeeded(session.id, true);
-            const maxChars = this.config.telegram?.max_chars ?? this.config.slack?.max_chars ?? 3500;
-            const msg = formatToolPairMessage({
-              callText,
-              outputText: frag.text,
-              maxMessageChars: maxChars,
+            // Send structured tool_output message; service.ts handles platform-specific formatting
+            await this.sendToSession(session.id, {
+              type: "tool_output",
+              name: pending?.toolName ?? "unknown",
+              output: frag.text,
+              callText: pending?.text,
+              priority: this.takeSendPriority(session.id),
             });
-            await this.sendToSession(session.id, { text: msg, priority: this.takeSendPriority(session.id) });
           }
         }
       }
