@@ -15,6 +15,7 @@ import type { SessionRow } from "./store.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { telegramChatIdMatchesAllowlist } from "./controller/utils.js";
 import type { CommitProposalStore } from "./controller/types.js";
+import { mergeTextIntoSlackBlocks } from "./message/slack.js";
 import { TelegramHandler } from "./controller/telegramHandler.js";
 import { SlackHandler } from "./controller/slackHandler.js";
 import { CloudHandler } from "./controller/cloudHandler.js";
@@ -264,12 +265,19 @@ export class BotController {
           : undefined
         : opts.replyToMessageId;
     if (opts.platform.platformName === "slack") {
+      let markup = opts.markup;
+      if (markup?.type === "blocks" && Array.isArray(markup.payload)) {
+        markup = {
+          type: "blocks",
+          payload: mergeTextIntoSlackBlocks(opts.text, markup.payload),
+        };
+      }
       await (opts.platform as SlackClient).sendMessage({
         chatId: opts.chatId,
         text: opts.text,
         threadId: undefined,
         replyToMessageId,
-        markup: opts.markup,
+        markup,
         priority,
         workspaceId: opts.workspaceId,
       });
