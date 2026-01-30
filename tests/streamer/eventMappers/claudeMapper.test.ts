@@ -84,6 +84,58 @@ test("mapClaudeEventToFragments assistant message", async (t) => {
     assert.equal(getFragmentText(result[0]), "$ ls -la");
   });
 
+  await t.test("should include toolName and toolInput in tool_call fragment", () => {
+    const result = mapClaudeEventToFragments(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Bash",
+              input: { command: "pwd" },
+            },
+          ],
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "Bash");
+      assert.equal(frag.toolInput, "pwd");
+    }
+  });
+
+  await t.test("should include toolName and toolInput for Read tool", () => {
+    const result = mapClaudeEventToFragments(
+      {
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              name: "Read",
+              input: { file_path: "/etc/passwd" },
+            },
+          ],
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "Read");
+      assert.ok(frag.toolInput?.includes("file_path"));
+    }
+  });
+
   await t.test("should format MCP tool names", () => {
     const result = mapClaudeEventToFragments(
       {

@@ -5,7 +5,7 @@ import type { UserLanguage } from "../../locales/index.js";
  */
 export type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
-  | { kind: "tool_call"; text: string }
+  | { kind: "tool_call"; text: string; toolName?: string; toolInput?: string }
   | { kind: "tool_output"; text: string }
   | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
   | { kind: "final" };

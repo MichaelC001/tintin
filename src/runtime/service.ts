@@ -1469,6 +1469,14 @@ export async function createBotService(deps: BotServiceDeps) {
           name: 'screenshot',
           output: message.caption ?? message.filename,
         };
+      } else if (message.type === "tool_call") {
+        // Send structured tool_call to WebSocket subscribers for real-time updates
+        wsMessage = {
+          type: 'tool_call',
+          sessionId,
+          name: message.name,
+          input: message.input,
+        };
       } else if (typeof message.text === "string") {
         wsMessage = { type: 'chunk', sessionId, content: message.text };
         if (message.final) {
@@ -1529,6 +1537,10 @@ export async function createBotService(deps: BotServiceDeps) {
         logger.warn(`send image failed session=${sessionId}: ${String(e)}`);
       }
       await sendToSession(sessionId, { text: `${caption}\n${t("image.saved_at", lang, { path: message.path })}`, priority: "user" });
+      return;
+    }
+    // tool_call messages are WebSocket-only; TG/Slack receive formatted tool output via the paired message
+    if (message.type === "tool_call") {
       return;
     }
     const text = message.text;

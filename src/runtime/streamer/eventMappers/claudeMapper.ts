@@ -86,7 +86,8 @@ export function mapClaudeEventToFragments(
         const name = stringOrEmpty((block as { name?: unknown }).name);
         const input = (block as { input?: unknown }).input;
         const formatted = formatClaudeToolUse(name, input, lang);
-        if (formatted) fragments.push({ kind: "tool_call", text: formatted });
+        const inputStr = formatToolInputString(input);
+        if (formatted) fragments.push({ kind: "tool_call", text: formatted, toolName: name || undefined, toolInput: inputStr });
         continue;
       }
 
@@ -135,6 +136,23 @@ function formatClaudeToolUse(name: string, input: unknown, lang: UserLanguage): 
   const parsed = parseMcpFunctionName(name);
   if (parsed) return `MCP: ${parsed.server}.${parsed.tool}`;
   return t("streamer.tool", lang, { name });
+}
+
+/**
+ * Format tool input as a string for WebSocket transmission.
+ */
+function formatToolInputString(input: unknown): string | undefined {
+  if (input === undefined || input === null) return undefined;
+  if (typeof input === "string") return input;
+  if (typeof input === "object") {
+    // For Bash commands, extract the command directly
+    if ("command" in input && typeof (input as { command?: unknown }).command === "string") {
+      return (input as { command: string }).command;
+    }
+    // For other tools, JSON stringify with truncation
+    return truncateJson(input, 500);
+  }
+  return String(input);
 }
 
 /**

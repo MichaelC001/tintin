@@ -28,6 +28,12 @@ export type SessionMessage =
       mimeType?: string;
       caption?: string;
       priority?: "user" | "background";
+    }
+  | {
+      type: "tool_call";
+      name: string;
+      input?: string;
+      priority?: "user" | "background";
     };
 
 export type SendToSessionFn = (sessionId: string, message: SessionMessage) => Promise<void>;

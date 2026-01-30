@@ -84,6 +84,28 @@ test("mapCodexEventToFragments response_item function_call", async (t) => {
     assert.equal(getFragmentText(result[0]), "$ ls -la");
   });
 
+  await t.test("should include toolName and toolInput in function_call fragment", () => {
+    const result = mapCodexEventToFragments(
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell_command",
+          arguments: JSON.stringify({ command: "pwd" }),
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "shell_command");
+      assert.equal(frag.toolInput, "pwd");
+    }
+  });
+
   await t.test("should skip function_call with verbosity < 3", () => {
     const result = mapCodexEventToFragments(
       {
@@ -169,6 +191,28 @@ test("mapCodexEventToFragments response_item custom_tool_call", async (t) => {
     assert.equal(result[0].kind, "tool_call");
     assert.ok(getFragmentText(result[0]).includes("my_tool"));
   });
+
+  await t.test("should include toolName and toolInput in custom_tool_call fragment", () => {
+    const result = mapCodexEventToFragments(
+      {
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "my_tool",
+          input: "test input",
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "my_tool");
+      assert.equal(frag.toolInput, "test input");
+    }
+  });
 });
 
 test("mapCodexEventToFragments response_item web_search_call", async (t) => {
@@ -206,6 +250,27 @@ test("mapCodexEventToFragments response_item local_shell_call", async (t) => {
     assert.ok(result[0]);
     assert.equal(result[0].kind, "tool_call");
     assert.equal(getFragmentText(result[0]), "$ git status");
+  });
+
+  await t.test("should include toolName and toolInput in local_shell_call fragment", () => {
+    const result = mapCodexEventToFragments(
+      {
+        type: "response_item",
+        payload: {
+          type: "local_shell_call",
+          action: { command: "git status" },
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "shell");
+      assert.equal(frag.toolInput, "git status");
+    }
   });
 });
 
@@ -272,6 +337,28 @@ test("mapCodexEventToFragments item.* events", async (t) => {
     assert.equal(getFragmentText(result[0]), "$ npm test");
   });
 
+  await t.test("should include toolName and toolInput in command_execution started", () => {
+    const result = mapCodexEventToFragments(
+      {
+        type: "item.started",
+        item: {
+          type: "command_execution",
+          command: "npm test",
+          status: "in_progress",
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "command");
+      assert.equal(frag.toolInput, "npm test");
+    }
+  });
+
   await t.test("should map command_execution completed with output", () => {
     const result = mapCodexEventToFragments(
       {
@@ -309,6 +396,30 @@ test("mapCodexEventToFragments item.* events", async (t) => {
     assert.ok(result[0]);
     assert.equal(result[0].kind, "tool_call");
     assert.ok(getFragmentText(result[0]).includes("playwright"));
+  });
+
+  await t.test("should include toolName and toolInput in mcp_tool_call started", () => {
+    const result = mapCodexEventToFragments(
+      {
+        type: "item.started",
+        item: {
+          type: "mcp_tool_call",
+          server: "playwright",
+          tool: "screenshot",
+          arguments: { url: "https://example.com" },
+          status: "in_progress",
+        },
+      },
+      { verbosity: 3 }
+    );
+    assert.equal(result.length, 1);
+    const frag = result[0];
+    assert.ok(frag);
+    assert.equal(frag.kind, "tool_call");
+    if (frag.kind === "tool_call") {
+      assert.equal(frag.toolName, "playwright.screenshot");
+      assert.ok(frag.toolInput?.includes("url"));
+    }
   });
 
   await t.test("should map file_change item with verbosity >= 2", () => {

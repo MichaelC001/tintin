@@ -25,7 +25,7 @@ export type MessageVerbosity = 1 | 2 | 3;
 
 export type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
-  | { kind: "tool_call"; text: string }
+  | { kind: "tool_call"; text: string; toolName?: string; toolInput?: string }
   | { kind: "tool_output"; text: string }
   | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
   | { kind: "final" };
@@ -256,6 +256,15 @@ export class JsonlStreamer {
             const q = this.pendingToolCalls.get(session.id) ?? [];
             q.push(frag.text);
             this.pendingToolCalls.set(session.id, q);
+            // Send tool_call event to WebSocket subscribers for real-time updates
+            if (frag.toolName) {
+              await this.sendToSession(session.id, {
+                type: "tool_call",
+                name: frag.toolName,
+                input: frag.toolInput,
+                priority: this.takeSendPriority(session.id),
+              });
+            }
             continue;
           }
 
