@@ -10,31 +10,6 @@ export interface AuthMessage {
   token?: string;
 }
 
-export interface ChatMessage {
-  type: 'chat';
-  sessionId?: string;
-  projectId?: string;
-  messages: Array<{
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-  }>;
-}
-
-export interface StopMessage {
-  type: 'stop';
-  sessionId: string;
-}
-
-export interface SubscribeMessage {
-  type: 'subscribe';
-  sessionId: string;
-}
-
-export interface UnsubscribeMessage {
-  type: 'unsubscribe';
-  sessionId: string;
-}
-
 export interface PingMessage {
   type: 'ping';
 }
@@ -83,12 +58,13 @@ export interface CloudFollowUpMessage {
   prompt: string;
 }
 
+export interface CloudStopMessage {
+  type: 'cloud_stop';
+  runId: string;
+}
+
 export type ClientMessage =
   | AuthMessage
-  | ChatMessage
-  | StopMessage
-  | SubscribeMessage
-  | UnsubscribeMessage
   | PingMessage
   | GetConnectionsMessage
   | ListReposMessage
@@ -96,7 +72,8 @@ export type ClientMessage =
   | StartOAuthMessage
   | CloudRunMessage
   | SubscribeRunMessage
-  | CloudFollowUpMessage;
+  | CloudFollowUpMessage
+  | CloudStopMessage;
 
 // ============ Server → Client Messages ============
 

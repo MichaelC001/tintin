@@ -259,6 +259,66 @@ export class CloudRunService {
     }
   }
 
+  /**
+   * Stop a cloud run by its run ID.
+   * Validates ownership, kills the session, and marks sandbox as ready.
+   */
+  async handleCloudStop(
+    connId: string,
+    conn: WSConnection,
+    runId: string,
+  ): Promise<void> {
+    try {
+      const validated = await this.validateRun(connId, runId);
+      if (!validated) return;
+
+      const { run, sessionId } = validated;
+
+      // Validate ownership
+      const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
+      if (run.identity_id !== dbIdentityId) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.ACCESS_DENIED,
+          message: 'You do not have access to this run',
+        });
+        return;
+      }
+
+      // Stop the cloud run
+      const stopped = await this.cloudManager.stopCloudRun(runId);
+      if (!stopped) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: 'Failed to stop run',
+        });
+        return;
+      }
+
+      // Mark sandbox as ready
+      if (this.sandboxService) {
+        this.sandboxService.markReady(connId);
+      }
+
+      // Broadcast done to all subscribers
+      this.wsManager.broadcastToSession(sessionId, {
+        type: 'done',
+        sessionId,
+        stopped: true,
+      });
+
+      this.logger.info(`[ws][cloud] run stopped connId=${connId} runId=${runId} sessionId=${sessionId}`);
+    } catch (err) {
+      this.logger.error(`[ws][cloud] handleCloudStop error connId=${connId}: ${String(err)}`);
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SERVICE_ERROR,
+        message: `Failed to stop cloud run: ${String(err)}`,
+      });
+    }
+  }
+
   async handleSubscribeRun(connId: string, runId: string): Promise<void> {
     try {
       const validated = await this.validateRun(connId, runId);

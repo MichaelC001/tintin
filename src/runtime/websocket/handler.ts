@@ -7,11 +7,10 @@ import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
-import { requireAuth, requireSessionId } from './guards.js';
-import { SessionService, GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+import { requireAuth } from './guards.js';
+import { GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export class WebSocketHandler {
-  private readonly sessionService: SessionService;
   private readonly githubService: GitHubService;
   private readonly cloudRunService: CloudRunService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
@@ -29,13 +28,6 @@ export class WebSocketHandler {
     private readonly logger: Logger,
     cloudManager: CloudManager | null = null,
   ) {
-    this.sessionService = new SessionService(
-      wsManager,
-      sessionManager,
-      config,
-      db,
-      logger,
-    );
     this.githubService = new GitHubService(
       wsManager,
       config,
@@ -61,35 +53,6 @@ export class WebSocketHandler {
       case 'auth':
         await this.handleAuth(connId, message.token);
         break;
-
-      case 'chat': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.sessionService.handleChat(connId, auth.conn, message);
-        break;
-      }
-
-      case 'stop': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
-        await this.sessionService.handleStop(connId, auth.conn, message.sessionId);
-        break;
-      }
-
-      case 'subscribe': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
-        await this.sessionService.handleSubscribe(connId, message.sessionId);
-        break;
-      }
-
-      case 'unsubscribe': {
-        if (!message.sessionId) return;
-        this.sessionService.handleUnsubscribe(connId, message.sessionId);
-        break;
-      }
 
       case 'ping':
         // Already handled in manager
@@ -176,6 +139,29 @@ export class WebSocketHandler {
           return;
         }
         await this.cloudRunService.handleCloudFollowUp(connId, auth.conn, message);
+        break;
+      }
+
+      case 'cloud_stop': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        if (!message.runId) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.INVALID_MESSAGE,
+            message: 'Run ID required',
+          });
+          return;
+        }
+        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
         break;
       }
 

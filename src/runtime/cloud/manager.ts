@@ -185,6 +185,33 @@ export class CloudManager {
     this.sessionManager = sessionManager;
   }
 
+  /**
+   * Stop a cloud run by killing its session and updating the run status.
+   * Returns true if the run was stopped, false if it was not running.
+   */
+  async stopCloudRun(runId: string): Promise<boolean> {
+    const run = await getCloudRun(this.db, runId);
+    if (!run) return false;
+
+    const sessionId = run.session_id;
+    if (!sessionId) return false;
+
+    // Kill the session process
+    if (this.sessionManager) {
+      try {
+        await this.sessionManager.killSession(sessionId, 'Stopped via WebSocket');
+      } catch (e) {
+        this.logger.warn(`[cloud] stopCloudRun kill session failed runId=${runId}: ${String(e)}`);
+      }
+    }
+
+    // Update run status to cancelled
+    await updateCloudRun(this.db, runId, { status: 'killed' });
+
+    this.logger.info(`[cloud] stopCloudRun runId=${runId} sessionId=${sessionId}`);
+    return true;
+  }
+
   private normalizeCloudProjectId(run: CloudRunsTable): string {
     return run.primary_repo_id ? `cloud:${run.primary_repo_id}` : `cloud:playground:${run.id}`;
   }
