@@ -78,6 +78,7 @@ import path from "node:path";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
+import type { PreviewUrlEvent } from "./websocket/handler.js";
 import type { ServerMessage } from "./websocket/types.js";
 
 export interface BotServiceDeps {
@@ -85,6 +86,8 @@ export interface BotServiceDeps {
   db: Db;
   logger: Logger;
 }
+
+export type PreviewUrlCallback = (event: PreviewUrlEvent) => void;
 
 type CloudConnectMetadata = {
   platform: "telegram" | "slack";
