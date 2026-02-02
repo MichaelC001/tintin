@@ -397,6 +397,10 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
 
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
+
+  // Preview URL callback (set after wsHandler is created)
+  let onPreviewUrl: PreviewUrlCallback | null = null;
+
   const slackEventStartTs = Math.floor(Date.now() / 1000);
 
   /**
@@ -2202,6 +2206,31 @@ export async function createBotService(deps: BotServiceDeps) {
               sendAgentText(400, "missing summary", { method: req.method ?? "", path: pathname, body });
               return;
             }
+
+            // Resolve Modal tunnel URL if in cloud mode
+            let tunnelUrl: string | null = null;
+            if (cloudManager?.getProviderId() === "modal" && ctx.sessionId) {
+              try {
+                const run = await getCloudRunBySession(db, ctx.sessionId);
+                if (run) {
+                  const sandbox = cloudManager.getModalProviderForDeploy().getSandbox(run.workspace_id);
+                  tunnelUrl = await resolveModalTunnelUrl(sandbox, port);
+
+                  // Push to frontend via callback
+                  if (tunnelUrl && onPreviewUrl) {
+                    (onPreviewUrl as PreviewUrlCallback)({
+                      sessionId: ctx.sessionId,
+                      runId: run.id,
+                      previewUrl: tunnelUrl,
+                      previewSummary: summary,
+                    });
+                  }
+                }
+              } catch (e) {
+                logger.debug(`[site] tunnel resolution failed: ${String(e)}`);
+              }
+            }
+
             const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
             sendAgentJson(
               200,
@@ -2210,7 +2239,7 @@ export async function createBotService(deps: BotServiceDeps) {
                 port: entry.port,
                 path: entry.path,
                 summary: entry.summary,
-                url: buildLocalSiteUrl(entry.port, entry.path),
+                url: tunnelUrl || buildLocalSiteUrl(entry.port, entry.path),
               },
               { method: req.method ?? "", path: pathname, body },
             );
