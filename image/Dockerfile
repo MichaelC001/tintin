@@ -10,18 +10,19 @@ RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
       sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g; s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list; \
     fi
 
-# Install system dependencies + Chrome, then clean apt caches
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install curl first (required for NodeSource setup), then Node.js 20.x LTS + system dependencies + Chrome
+# Note: NodeSource setup and apt-get install must be in the same RUN to ensure correct apt sources
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get install -y --no-install-recommends \
   python3 \
   python3-pip \
   xvfb \
   x11vnc \
   xdotool \
   wget \
-  curl \
   git \
   nodejs \
-  npm \
   xfce4 \
   x11-xserver-utils \
   papirus-icon-theme \
@@ -47,7 +48,7 @@ RUN mkdir -p /tmp/.X11-unix \
   && chown root:root /tmp/.X11-unix \
   && chmod 1777 /tmp/.X11-unix
 
-# Install Codex + Claude Code CLIs (Node 18+ required for Claude Code)
+# Install Codex + Claude Code CLIs
 RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
   && npm cache clean --force \
   && rm -rf /root/.npm

@@ -2212,12 +2212,17 @@ export async function createBotService(deps: BotServiceDeps) {
 
             // Resolve Modal tunnel URL if in cloud mode
             let tunnelUrl: string | null = null;
-            if (cloudManager?.getProviderId() === "modal" && ctx.sessionId) {
+            const providerId = cloudManager?.getProviderId();
+            logger.debug(`[site/add] session=${ctx.sessionId} provider=${providerId} port=${port}`);
+            if (providerId === "modal" && ctx.sessionId) {
               try {
                 const run = await getCloudRunBySession(db, ctx.sessionId);
+                logger.debug(`[site/add] run lookup session=${ctx.sessionId} found=${!!run} workspaceId=${run?.workspace_id ?? 'null'}`);
                 if (run) {
-                  const sandbox = cloudManager.getModalProviderForDeploy().getSandbox(run.workspace_id);
+                  const sandbox = cloudManager!.getModalProviderForDeploy().getSandbox(run.workspace_id);
+                  logger.debug(`[site/add] sandbox found, resolving tunnel for port=${port}`);
                   tunnelUrl = await resolveModalTunnelUrl(sandbox, port);
+                  logger.debug(`[site/add] tunnel resolved session=${ctx.sessionId} url=${tunnelUrl || 'empty'}`);
 
                   // Push to frontend via callback
                   if (tunnelUrl && onPreviewUrl) {
@@ -2227,11 +2232,14 @@ export async function createBotService(deps: BotServiceDeps) {
                       previewUrl: tunnelUrl,
                       previewSummary: summary,
                     });
+                    logger.debug(`[site/add] previewUrl pushed session=${ctx.sessionId} url=${tunnelUrl}`);
                   }
                 }
               } catch (e) {
-                logger.debug(`[site] tunnel resolution failed: ${String(e)}`);
+                logger.warn(`[site/add] tunnel resolution failed session=${ctx.sessionId}: ${String(e)}`);
               }
+            } else {
+              logger.debug(`[site/add] skipped tunnel resolution: provider=${providerId} session=${ctx.sessionId || 'empty'}`);
             }
 
             const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });

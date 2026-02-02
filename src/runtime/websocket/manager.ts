@@ -228,7 +228,7 @@ export class WebSocketManager {
    */
   getConnectionBySession(sessionId: string): string | null {
     for (const [connId, conn] of this.connections) {
-      if (conn.sandbox?.activeSessionId === sessionId) {
+      if (conn.sandbox?.sessionId === sessionId) {
         return connId;
       }
     }

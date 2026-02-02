@@ -54,7 +54,6 @@ export class SandboxLifecycleService {
         status: 'provisioning',
         runId: null,
         sessionId: null,
-        activeSessionId: null,
         dbIdentityId,
         createdAt: Date.now(),
         error: null,
