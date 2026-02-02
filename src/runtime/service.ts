@@ -1744,6 +1744,9 @@ export async function createBotService(deps: BotServiceDeps) {
     wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
     wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
 
+    // Connect preview URL callback
+    onPreviewUrl = (event) => wsHandler!.pushPreviewUrl(event);
+
     // Set up disconnect handler for sandbox termination
     if (cloudManager && wsHandler.sandboxLifecycleService) {
       const sandboxService = wsHandler.sandboxLifecycleService;
