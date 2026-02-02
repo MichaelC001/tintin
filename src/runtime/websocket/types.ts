@@ -220,6 +220,8 @@ export interface RunLinksMessage {
   viewUrl?: string;
   vscodeUrl?: string;          // VS Code desktop URI scheme
   codeServerUrl?: string;      // Modal tunnel URL (direct access to web code-server)
+  previewUrl?: string;         // Dev server tunnel URL
+  previewSummary?: string;     // Description for UI display
 }
 
 export interface BrowserSessionMessage {
