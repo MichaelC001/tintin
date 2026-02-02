@@ -10,6 +10,13 @@ import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth } from './guards.js';
 import { GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
 
+export interface PreviewUrlEvent {
+  sessionId: string;
+  runId: string;
+  previewUrl: string;
+  previewSummary: string;
+}
+
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
   private readonly cloudRunService: CloudRunService | null;
@@ -43,6 +50,26 @@ export class WebSocketHandler {
     this.cloudRunService = cloudManager
       ? new CloudRunService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
       : null;
+  }
+
+  /**
+   * Push preview URL to frontend via WebSocket.
+   * Called by service.ts when agent registers a site.
+   */
+  pushPreviewUrl(event: PreviewUrlEvent): void {
+    const connId = this.wsManager.getConnectionBySession(event.sessionId);
+    if (!connId) {
+      this.logger.debug(`[ws] pushPreviewUrl: no connection for session=${event.sessionId}`);
+      return;
+    }
+    this.wsManager.sendToConnection(connId, {
+      type: 'run_links',
+      runId: event.runId,
+      sessionId: event.sessionId,
+      previewUrl: event.previewUrl,
+      previewSummary: event.previewSummary,
+    });
+    this.logger.debug(`[ws] pushPreviewUrl sent connId=${connId} session=${event.sessionId} url=${event.previewUrl}`);
   }
 
   async handleMessage(connId: string, message: ClientMessage): Promise<void> {
