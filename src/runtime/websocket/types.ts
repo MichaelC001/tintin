@@ -314,6 +314,7 @@ export interface ConnectionSandbox {
   status: ConnectionSandboxStatus;
   runId: string | null;
   sessionId: string | null;
+  activeSessionId: string | null;
   dbIdentityId: string;
   createdAt: number;
   error: string | null;

@@ -222,6 +222,19 @@ export class WebSocketManager {
     return this.connections.get(connId);
   }
 
+  /**
+   * Find connection ID by active session ID.
+   * Returns null if no connection is associated with the session.
+   */
+  getConnectionBySession(sessionId: string): string | null {
+    for (const [connId, conn] of this.connections) {
+      if (conn.sandbox?.activeSessionId === sessionId) {
+        return connId;
+      }
+    }
+    return null;
+  }
+
   setAuthenticated(connId: string, identityId: string): boolean {
     const conn = this.connections.get(connId);
     if (!conn) return false;
