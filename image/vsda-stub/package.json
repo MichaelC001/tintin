@@ -1,0 +1,7 @@
+{
+  "name": "vsda-stub",
+  "version": "1.0.0",
+  "description": "VSDA stub for code-server browser mode",
+  "main": "vsda.js",
+  "type": "commonjs"
+}
