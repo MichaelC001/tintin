@@ -798,17 +798,18 @@ export class CloudManager {
 
   private wrapAgentRelayCommand(cmd: string, opts: { sessionId: string; agent: SessionAgent; token: string; url: string }): string {
     const fifo = `/tmp/tintin-log-${opts.sessionId}.fifo`;
-    const envPrefix = [
-      `TINTIN_AGENT_URL=${shellQuote(opts.url)}`,
-      `TINTIN_AGENT_TOKEN=${shellQuote(opts.token)}`,
-      `TINTIN_AGENT_SESSION=${shellQuote(opts.sessionId)}`,
-      `TINTIN_AGENT_AGENT=${shellQuote(opts.agent)}`,
-    ].join(" ");
-    const agentCmd = `${envPrefix} tintin-log-agent`;
+    // Use export so env vars are available to both tintin-log-agent and the agent command
+    const envExports = [
+      `export TINTIN_AGENT_URL=${shellQuote(opts.url)}`,
+      `export TINTIN_AGENT_TOKEN=${shellQuote(opts.token)}`,
+      `export TINTIN_AGENT_SESSION=${shellQuote(opts.sessionId)}`,
+      `export TINTIN_AGENT_AGENT=${shellQuote(opts.agent)}`,
+    ].join("\n");
     return [
+      envExports,
       `rm -f ${shellQuote(fifo)}`,
       `mkfifo ${shellQuote(fifo)}`,
-      `${agentCmd} < ${shellQuote(fifo)} &`,
+      `tintin-log-agent < ${shellQuote(fifo)} &`,
       "AGENT_PID=$!",
       `(${cmd}) > ${shellQuote(fifo)}`,
       "CODEX_EXIT=$?",
