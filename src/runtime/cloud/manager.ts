@@ -3702,7 +3702,11 @@ AGENTS_EOF`;
       const tunnels = (await sandbox.tunnels(timeoutMs)) as Record<string | number, { url?: string } | undefined>;
       const vsCode = tunnels[8080];
       const url = vsCode?.url;
-      return typeof url === "string" && url.trim().length > 0 ? url : null;
+      if (typeof url === "string" && url.trim().length > 0) {
+        const workspaceRoot = this.config.cloud?.modal?.workspace_root ?? "/workspace/tintin";
+        return `${url}?folder=${encodeURIComponent(workspaceRoot)}`;
+      }
+      return null;
     } catch (e) {
       this.logger.debug(`[cloud][modal] vscode tunnel lookup failed session=${sessionId}: ${String(e)}`);
       return null;
