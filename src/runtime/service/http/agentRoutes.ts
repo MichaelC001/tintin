@@ -384,26 +384,28 @@ export async function handleAgentRoutes(params: {
 
       // Setup preview proxy and get tunnel URL for Modal provider
       let previewUrl = "";
+      let cloudRunId = "";
       if (deps.cloudManager?.getProviderId() === "modal") {
-        const sessionRow = await db
-          .selectFrom("sessions")
-          .select(["workspace_id"])
-          .where("id", "=", ctx.sessionId)
+        const cloudRun = await db
+          .selectFrom("cloud_runs")
+          .select(["id", "workspace_id"])
+          .where("session_id", "=", ctx.sessionId)
           .executeTakeFirst();
 
-        if (sessionRow?.workspace_id) {
+        if (cloudRun?.workspace_id) {
+          cloudRunId = cloudRun.id;
           const modal = deps.cloudManager.getModalProviderForDeploy();
 
           // Setup socat proxy
           try {
-            await modal.setupPreviewProxy(sessionRow.workspace_id, port);
+            await modal.setupPreviewProxy(cloudRun.workspace_id, port);
           } catch (e) {
             logger.warn(`[site/add] preview proxy setup failed session=${ctx.sessionId}: ${String(e)}`);
           }
 
           // Get tunnel URL for preview port
           try {
-            const sandbox = await modal.getSandboxHandle(sessionRow.workspace_id);
+            const sandbox = await modal.getSandboxHandle(cloudRun.workspace_id);
             previewUrl = await resolveModalTunnelUrl(sandbox, modal.getPreviewPort());
           } catch (e) {
             logger.warn(`[site/add] tunnel URL resolve failed session=${ctx.sessionId}: ${String(e)}`);
@@ -412,22 +414,14 @@ export async function handleAgentRoutes(params: {
       }
 
       // Push preview URL via WebSocket
-      if (previewUrl && deps.wsManager) {
-        const cloudRun = await db
-          .selectFrom("cloud_runs")
-          .select(["id"])
-          .where("session_id", "=", ctx.sessionId)
-          .executeTakeFirst();
-
-        if (cloudRun) {
-          deps.wsManager.broadcastToSession(ctx.sessionId, {
-            type: "run_links",
-            runId: cloudRun.id,
-            sessionId: ctx.sessionId,
-            previewUrl,
-            previewSummary: summary,
-          });
-        }
+      if (previewUrl && deps.wsManager && cloudRunId) {
+        deps.wsManager.broadcastToSession(ctx.sessionId, {
+          type: "run_links",
+          runId: cloudRunId,
+          sessionId: ctx.sessionId,
+          previewUrl,
+          previewSummary: summary,
+        });
       }
 
       const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
