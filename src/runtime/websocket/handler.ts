@@ -7,13 +7,24 @@ import type { WebSocketManager } from './manager.js';
 import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
-import { requireAuth, requireSessionId } from './guards.js';
-import { SessionService, GitHubService, CloudRunService } from './services/index.js';
+import { requireAuth } from './guards.js';
+import { GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+
+export interface PreviewUrlEvent {
+  sessionId: string;
+  runId: string;
+  previewUrl: string;
+  previewSummary: string;
+}
 
 export class WebSocketHandler {
-  private readonly sessionService: SessionService;
   private readonly githubService: GitHubService;
   private readonly cloudRunService: CloudRunService | null;
+  readonly sandboxLifecycleService: SandboxLifecycleService | null;
+
+  get cloudService(): CloudRunService | null {
+    return this.cloudRunService;
+  }
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -24,22 +35,41 @@ export class WebSocketHandler {
     private readonly logger: Logger,
     cloudManager: CloudManager | null = null,
   ) {
-    this.sessionService = new SessionService(
-      wsManager,
-      sessionManager,
-      config,
-      db,
-      logger,
-    );
     this.githubService = new GitHubService(
       wsManager,
       config,
       db,
       logger,
     );
-    this.cloudRunService = cloudManager
-      ? new CloudRunService(wsManager, cloudManager, config, db, logger)
+
+    // Initialize sandbox lifecycle service if cloud is enabled
+    this.sandboxLifecycleService = cloudManager
+      ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
       : null;
+
+    this.cloudRunService = cloudManager
+      ? new CloudRunService(wsManager, cloudManager, config, db, logger, this.sandboxLifecycleService)
+      : null;
+  }
+
+  /**
+   * Push preview URL to frontend via WebSocket.
+   * Called by service.ts when agent registers a site.
+   */
+  pushPreviewUrl(event: PreviewUrlEvent): void {
+    const connId = this.wsManager.getConnectionBySession(event.sessionId);
+    if (!connId) {
+      this.logger.debug(`[ws] pushPreviewUrl: no connection for session=${event.sessionId}`);
+      return;
+    }
+    this.wsManager.sendToConnection(connId, {
+      type: 'run_links',
+      runId: event.runId,
+      sessionId: event.sessionId,
+      previewUrl: event.previewUrl,
+      previewSummary: event.previewSummary,
+    });
+    this.logger.debug(`[ws] pushPreviewUrl sent connId=${connId} session=${event.sessionId} url=${event.previewUrl}`);
   }
 
   async handleMessage(connId: string, message: ClientMessage): Promise<void> {
@@ -50,35 +80,6 @@ export class WebSocketHandler {
       case 'auth':
         await this.handleAuth(connId, message.token);
         break;
-
-      case 'chat': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.sessionService.handleChat(connId, auth.conn, message);
-        break;
-      }
-
-      case 'stop': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
-        await this.sessionService.handleStop(connId, auth.conn, message.sessionId);
-        break;
-      }
-
-      case 'subscribe': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        if (!requireSessionId(this.wsManager, connId, message.sessionId)) return;
-        await this.sessionService.handleSubscribe(connId, message.sessionId);
-        break;
-      }
-
-      case 'unsubscribe': {
-        if (!message.sessionId) return;
-        this.sessionService.handleUnsubscribe(connId, message.sessionId);
-        break;
-      }
 
       case 'ping':
         // Already handled in manager
@@ -153,6 +154,44 @@ export class WebSocketHandler {
         break;
       }
 
+      case 'cloud_follow_up': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        await this.cloudRunService.handleCloudFollowUp(connId, auth.conn, message);
+        break;
+      }
+
+      case 'cloud_stop': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        if (!this.cloudRunService) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.SERVICE_ERROR,
+            message: 'Cloud run is not enabled',
+          });
+          return;
+        }
+        if (!message.runId) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.INVALID_MESSAGE,
+            message: 'Run ID required',
+          });
+          return;
+        }
+        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
+        break;
+      }
+
       default:
         this.wsManager.sendToConnection(connId, {
           type: 'error',
@@ -186,6 +225,11 @@ export class WebSocketHandler {
         identityId,
       });
       this.logger.debug(`[ws] auth ok (no-auth mode) id=${connId} identity=${identityId}`);
+
+      // Provision sandbox after successful auth (async, non-blocking)
+      if (this.sandboxLifecycleService) {
+        void this.sandboxLifecycleService.provisionSandbox(connId, identityId);
+      }
       return;
     }
 
@@ -237,5 +281,10 @@ export class WebSocketHandler {
       identityId: verified.identityId,
     });
     this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);
+
+    // Provision sandbox after successful auth (async, non-blocking)
+    if (this.sandboxLifecycleService) {
+      void this.sandboxLifecycleService.provisionSandbox(connId, verified.identityId);
+    }
   }
 }

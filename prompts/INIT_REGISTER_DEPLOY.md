@@ -1,11 +1,12 @@
----
-name: manus-code-site-deploy
-description: Manage system commands for code directory registration, UI server exposure, and static/dynamic deployments. Use when tasks involve `code add/list/ignore`, `site add/list/ignore`, starting UI dev/prod servers bound to 0.0.0.0, or deploying projects via `static-deploy`/`dynamic-deploy` (including next/flask/express variants) with required summary and app_name args.
----
-
-# Code Site Deploy
+# Code / Site / Deploy
 
 ## Overview
+
+When you work beyond the current directory (e.g., you are in /workspace but need to make some changes to /root/project), always add the directory via `code add ..`. If you later find out it is irrelevant (e.g., do not ignore /root/project even if you are switching back to work on /workspace, only ignore if you find out /root/project is not really your target and you are undoing the changes), always use `code ignore ..` to ignore that directory. 
+
+When you start a UI server (e.g., Next) and want to present to the user, you shall always register the port of it, so that the user can preview what you have done. AVOID showing user a screen full of errors (e.g., do minimum verification that it wont crash and only present after you at least close all the HTML tags). 
+
+You are presenting to the user what you are trying to work on. 
 
 Register code directories, expose running UI servers, and deploy projects using the command set while keeping payloads minimal.
 

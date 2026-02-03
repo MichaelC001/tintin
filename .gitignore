@@ -44,3 +44,7 @@ config.e2e.toml
 # Finder (MacOS) folder config
 .DS_Store
 demo/
+ 
+# local build artifacts
+node
+tsc

@@ -13,6 +13,7 @@ export class WebSocketManager {
   private readonly identityConnections = new Map<string, Set<string>>(); // identityId → connectionIds
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private handler: ((connId: string, message: ClientMessage) => Promise<void>) | null = null;
+  private disconnectHandler: ((connId: string, conn: WSConnection) => Promise<void>) | null = null;
 
   constructor(
     private readonly config: WebSocketSection,
@@ -24,6 +25,10 @@ export class WebSocketManager {
 
   setHandler(handler: (connId: string, message: ClientMessage) => Promise<void>): void {
     this.handler = handler;
+  }
+
+  setDisconnectHandler(handler: (connId: string, conn: WSConnection) => Promise<void>): void {
+    this.disconnectHandler = handler;
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -53,6 +58,7 @@ export class WebSocketManager {
       lastActivityAt: now,
       createdAt: now,
       messageCount: 0,
+      sandbox: null,
     };
 
     this.connections.set(connId, conn);
@@ -177,6 +183,13 @@ export class WebSocketManager {
   private handleClose(conn: WSConnection, code: number, reason: string): void {
     this.logger.debug(`[ws] connection closed id=${conn.id} code=${code} reason=${reason}`);
 
+    // Call disconnect handler before cleanup (for sandbox termination)
+    if (this.disconnectHandler) {
+      this.disconnectHandler(conn.id, conn).catch((err) => {
+        this.logger.warn(`[ws] disconnect handler error id=${conn.id}: ${String(err)}`);
+      });
+    }
+
     // Clean up session subscriptions
     for (const sessionId of conn.subscribedSessions) {
       const subscribers = this.sessionSubscribers.get(sessionId);
@@ -207,6 +220,19 @@ export class WebSocketManager {
 
   getConnection(connId: string): WSConnection | undefined {
     return this.connections.get(connId);
+  }
+
+  /**
+   * Find connection ID by active session ID.
+   * Returns null if no connection is associated with the session.
+   */
+  getConnectionBySession(sessionId: string): string | null {
+    for (const [connId, conn] of this.connections) {
+      if (conn.sandbox?.sessionId === sessionId) {
+        return connId;
+      }
+    }
+    return null;
   }
 
   setAuthenticated(connId: string, identityId: string): boolean {
@@ -358,6 +384,18 @@ export class WebSocketManager {
       connections: this.connections.size,
       sessions: this.sessionSubscribers.size,
     };
+  }
+
+  /**
+   * Find the connection ID whose sandbox is associated with the given session.
+   */
+  findConnectionBySandboxSession(sessionId: string): string | null {
+    for (const [connId, conn] of this.connections) {
+      if (conn.sandbox?.sessionId === sessionId) {
+        return connId;
+      }
+    }
+    return null;
   }
 
   close(): void {

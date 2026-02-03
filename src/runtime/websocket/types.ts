@@ -10,31 +10,6 @@ export interface AuthMessage {
   token?: string;
 }
 
-export interface ChatMessage {
-  type: 'chat';
-  sessionId?: string;
-  projectId?: string;
-  messages: Array<{
-    role: 'user' | 'assistant' | 'system';
-    content: string;
-  }>;
-}
-
-export interface StopMessage {
-  type: 'stop';
-  sessionId: string;
-}
-
-export interface SubscribeMessage {
-  type: 'subscribe';
-  sessionId: string;
-}
-
-export interface UnsubscribeMessage {
-  type: 'unsubscribe';
-  sessionId: string;
-}
-
 export interface PingMessage {
   type: 'ping';
 }
@@ -66,7 +41,10 @@ export interface CloudRunMessage {
   repoIds?: string[];              // repo IDs (empty array = playground mode)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
-  restoreSnapshotId?: string;      // optional, restore from snapshot
+  language?: string;               // optional, language code (e.g., 'en', 'zh')
+  restoreSnapshotId?: string;      // optional, restore from specified snapshot
+  autoRestore?: boolean;           // optional, auto-restore from latest snapshot
+  lastRunId?: string;              // optional, restore from specific run's snapshot
 }
 
 export interface SubscribeRunMessage {
@@ -74,19 +52,28 @@ export interface SubscribeRunMessage {
   runId: string;
 }
 
+export interface CloudFollowUpMessage {
+  type: 'cloud_follow_up';
+  runId: string;
+  prompt: string;
+}
+
+export interface CloudStopMessage {
+  type: 'cloud_stop';
+  runId: string;
+}
+
 export type ClientMessage =
   | AuthMessage
-  | ChatMessage
-  | StopMessage
-  | SubscribeMessage
-  | UnsubscribeMessage
   | PingMessage
   | GetConnectionsMessage
   | ListReposMessage
   | GetAuthStatusMessage
   | StartOAuthMessage
   | CloudRunMessage
-  | SubscribeRunMessage;
+  | SubscribeRunMessage
+  | CloudFollowUpMessage
+  | CloudStopMessage;
 
 // ============ Server → Client Messages ============
 
@@ -231,7 +218,10 @@ export interface RunLinksMessage {
   runId: string;
   sessionId: string;
   viewUrl?: string;
-  vscodeUrl?: string;
+  vscodeUrl?: string;          // VS Code desktop URI scheme
+  codeServerUrl?: string;      // Modal tunnel URL (direct access to web code-server)
+  previewUrl?: string;         // Dev server tunnel URL
+  previewSummary?: string;     // Description for UI display
 }
 
 export interface BrowserSessionMessage {
@@ -239,7 +229,22 @@ export interface BrowserSessionMessage {
   sessionId: string;
   runId: string;
   cdpUrl: string;
+  liveViewUrl?: string;
   provider: BrowserProvider;
+}
+
+export interface FollowUpQueuedMessage {
+  type: 'follow_up_queued';
+  runId: string;
+  sessionId: string;
+  position: number;
+}
+
+export interface FollowUpResumingMessage {
+  type: 'follow_up_resuming';
+  runId: string;
+  sessionId: string;
+  status: 'resuming' | 'restarting';
 }
 
 export type ServerMessage =
@@ -260,7 +265,12 @@ export type ServerMessage =
   | OAuthStartedMessage
   | RunStatusMessage
   | RunLinksMessage
-  | BrowserSessionMessage;
+  | BrowserSessionMessage
+  | SandboxStatusMessage
+  | SandboxReadyMessage
+  | SandboxErrorMessage
+  | FollowUpQueuedMessage
+  | FollowUpResumingMessage;
 
 // ============ Error Codes ============
 
@@ -272,9 +282,62 @@ export const ErrorCodes = {
   RATE_LIMIT: 'RATE_LIMIT',
   INVALID_MESSAGE: 'INVALID_MESSAGE',
   SERVICE_ERROR: 'SERVICE_ERROR',
+  RUN_NOT_RESUMABLE: 'RUN_NOT_RESUMABLE',
 } as const;
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes];
+
+// ============ Connection Sandbox State ============
+
+/**
+ * Sandbox status for a WebSocket connection.
+ * - provisioning: Workspace is being created
+ * - ready: Workspace is ready for use
+ * - in_use: An agent run is active in the sandbox
+ * - terminating: Workspace is being terminated
+ * - error: Sandbox provisioning or operation failed
+ */
+export type ConnectionSandboxStatus =
+  | 'provisioning'
+  | 'ready'
+  | 'in_use'
+  | 'terminating'
+  | 'error';
+
+/**
+ * Represents a sandbox (workspace) tied to a WebSocket connection.
+ * Created on auth success, destroyed on disconnect.
+ */
+export interface ConnectionSandbox {
+  workspaceId: string;
+  rootPath: string;
+  status: ConnectionSandboxStatus;
+  runId: string | null;
+  sessionId: string | null;
+  dbIdentityId: string;
+  createdAt: number;
+  error: string | null;
+}
+
+// ============ Sandbox Messages (Server → Client) ============
+
+export interface SandboxStatusMessage {
+  type: 'sandbox_status';
+  status: ConnectionSandboxStatus;
+  workspaceId?: string;
+  message?: string;
+}
+
+export interface SandboxReadyMessage {
+  type: 'sandbox_ready';
+  workspaceId: string;
+}
+
+export interface SandboxErrorMessage {
+  type: 'sandbox_error';
+  message: string;
+  recoverable: boolean;
+}
 
 // ============ Connection State ============
 
@@ -288,6 +351,7 @@ export interface WSConnection {
   lastActivityAt: number;
   createdAt: number;
   messageCount: number;
+  sandbox: ConnectionSandbox | null;
 }
 
 // ============ WebSocket Config ============

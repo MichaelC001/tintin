@@ -5,13 +5,15 @@ import { isRecord, getString } from "../typeGuards.js";
 export interface HyperbrowserSessionInfo {
   id: string;
   wsEndpoint: string;
+  liveUrl: string | null;
 }
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
-function parseSessionResponse(payload: unknown): HyperbrowserSessionInfo {
+/** @internal Exported for testing */
+export function parseSessionResponse(payload: unknown): HyperbrowserSessionInfo {
   if (!payload || typeof payload !== "object") {
     throw new Error("Hyperbrowser session response is not an object");
   }
@@ -22,7 +24,8 @@ function parseSessionResponse(payload: unknown): HyperbrowserSessionInfo {
   if (!id || !wsEndpoint) {
     throw new Error("Hyperbrowser session response missing id/wsEndpoint");
   }
-  return { id, wsEndpoint };
+  const liveUrl = getString(data.liveUrl) ?? getString(data.live_url) ?? null;
+  return { id, wsEndpoint, liveUrl };
 }
 
 export async function createHyperbrowserSession(opts: {

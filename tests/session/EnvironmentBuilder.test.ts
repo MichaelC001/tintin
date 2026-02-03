@@ -37,7 +37,6 @@ test("EnvironmentBuilder withLanguage", async (t) => {
     builder.withLanguage("zh");
 
     const env = builder.getEnv();
-    assert.equal(env.CHATGPT_PROXY_LANGUAGE, "zh");
     assert.equal(env.TINTIN_USER_LANGUAGE, "zh");
     assert.equal(env.LANG, "zh_CN.UTF-8");
     assert.equal(env.LC_ALL, "zh_CN.UTF-8");
@@ -48,7 +47,6 @@ test("EnvironmentBuilder withLanguage", async (t) => {
     builder.withLanguage("en");
 
     const env = builder.getEnv();
-    assert.equal(env.CHATGPT_PROXY_LANGUAGE, "en");
     assert.equal(env.TINTIN_USER_LANGUAGE, "en");
     assert.equal(env.LANG, "en_US.UTF-8");
     assert.equal(env.LC_ALL, "en_US.UTF-8");
@@ -130,7 +128,7 @@ test("EnvironmentBuilder chaining", async (t) => {
       .build();
 
     assert.equal(env.BASE, "value");
-    assert.equal(env.CHATGPT_PROXY_LANGUAGE, "en");
+    assert.equal(env.TINTIN_USER_LANGUAGE, "en");
     assert.equal(env.CUSTOM, "setting");
   });
 });

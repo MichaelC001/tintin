@@ -6,6 +6,7 @@ declare module "ws" {
     send(data: unknown): void;
     close(code?: number, reason?: string): void;
     ping(): void;
+    on(event: "open", listener: () => void): this;
     on(event: "message", listener: (data: RawData) => void): this;
     on(event: "close", listener: (code: number, reason: Buffer) => void): this;
     on(event: "error", listener: (err: Error) => void): this;

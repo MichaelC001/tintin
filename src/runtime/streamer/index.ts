@@ -25,6 +25,7 @@ export type {
   EventMapperOptions,
   EventMsgPayloadOptions,
   BufferState,
+  PendingToolCall,
 } from "./types.js";
 
 export {

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
-import type { SessionMessage } from "../messaging.js";
+import { isTextMessage, type SessionMessage } from "../messaging.js";
 import type { TelegramClient } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
 import type { CommitProposal, CommitProposalStore } from "../controller/types.js";
@@ -312,7 +312,8 @@ export function createCommitProposalRuntime(deps: {
     if (!pending) return false;
     if (message.type === "finalize") return false;
     if (message.type === "plan_update" || message.type === "image") return true;
-    const text = typeof message.text === "string" ? message.text : "";
+    if (!isTextMessage(message)) return false;
+    const text = message.text;
     if (text || message.final) {
       pending.buffer = pending.buffer ? `${pending.buffer}\n${text}` : text;
       if (pending.buffer.length > 40_000) {

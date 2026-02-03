@@ -75,7 +75,7 @@ export function mapCodexEventToFragments(
         const argsText = typeof argumentsRaw === "string" ? argumentsRaw : "";
         const cmd = extractCommandFromToolArgs(name, argsText);
         const text = cmd ? `$ ${cmd}` : t("streamer.tool", lang, { name });
-        return [{ kind: "tool_call", text }];
+        return [{ kind: "tool_call", text, toolName: name, toolInput: cmd || argsText || undefined }];
       }
 
       if (itemType === "function_call_output") {
@@ -91,8 +91,9 @@ export function mapCodexEventToFragments(
         const name = (payload as { name?: unknown }).name;
         const input = (payload as { input?: unknown }).input;
         if (typeof name !== "string") return [];
+        const inputStr = typeof input === "string" ? input : undefined;
         const line = typeof input === "string" && input.length > 0 ? `${name}: ${input}` : `${name}`;
-        return [{ kind: "tool_call", text: t("streamer.tool", lang, { name: line }) }];
+        return [{ kind: "tool_call", text: t("streamer.tool", lang, { name: line }), toolName: name, toolInput: inputStr }];
       }
 
       if (itemType === "custom_tool_call_output") {
@@ -114,7 +115,7 @@ export function mapCodexEventToFragments(
         if (!includeTools) return [];
         const action = (payload as { action?: unknown }).action;
         const cmd = action && typeof action === "object" ? (action as { command?: unknown }).command : undefined;
-        if (typeof cmd === "string") return [{ kind: "tool_call", text: `$ ${cmd}` }];
+        if (typeof cmd === "string") return [{ kind: "tool_call", text: `$ ${cmd}`, toolName: "shell", toolInput: cmd }];
       }
 
       return [];
@@ -161,7 +162,7 @@ export function mapCodexEventToFragments(
       const exit = numberOrNull((item as { exit_code?: unknown }).exit_code);
       const isStart = type === "item.started" || status === "in_progress";
       if (isStart) {
-        return cmd ? [{ kind: "tool_call", text: `$ ${cmd}` }] : [];
+        return cmd ? [{ kind: "tool_call", text: `$ ${cmd}`, toolName: "command", toolInput: cmd }] : [];
       }
       const commandLabel = cmd ? `$ ${cmd}` : t("streamer.command", lang);
       if (output) {
@@ -172,21 +173,23 @@ export function mapCodexEventToFragments(
         const base = cmd
           ? t("streamer.command_completed_with", lang, { command: commandLabel })
           : t("streamer.command_completed", lang);
-        return [{ kind: "text", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim() }];
+        return [{ kind: "tool_output", text: `${base} ${t("streamer.command_exit", lang, { code: exit })}`.trim(), toolName: "command", formatAsCode: false }];
       }
       if (status === "failed") {
         return [
           {
-            kind: "text",
+            kind: "tool_output",
             text: cmd
               ? t("streamer.command_failed_with", lang, { command: commandLabel })
               : t("streamer.command_failed", lang),
+            toolName: "command",
+            formatAsCode: false,
           },
         ];
       }
       return cmd
-        ? [{ kind: "text", text: t("streamer.command_completed_with", lang, { command: commandLabel }) }]
-        : [{ kind: "text", text: t("streamer.command_completed", lang) }];
+        ? [{ kind: "tool_output", text: t("streamer.command_completed_with", lang, { command: commandLabel }), toolName: "command", formatAsCode: false }]
+        : [{ kind: "tool_output", text: t("streamer.command_completed", lang), toolName: "command", formatAsCode: false }];
     }
     if (detailsType === "mcp_tool_call") {
       if (!includeTools) return [];
@@ -199,7 +202,8 @@ export function mapCodexEventToFragments(
       const toolLabel = label ? `MCP ${label}` : t("streamer.mcp_tool", lang);
       const isStart = type === "item.started" || status === "in_progress";
       if (isStart) {
-        return [{ kind: "tool_call", text: `${toolLabel}${argText}` }];
+        const inputStr = args === undefined ? undefined : truncateJson(args, 500);
+        return [{ kind: "tool_call", text: `${toolLabel}${argText}`, toolName: label || "mcp", toolInput: inputStr }];
       }
       const output = extractMcpResultText((item as { result?: unknown }).result);
       const err = stringOrEmpty((item as { error?: unknown }).error);
@@ -211,7 +215,7 @@ export function mapCodexEventToFragments(
       if (!body && (item as { result?: unknown }).result !== undefined) {
         body = truncateJson((item as { result?: unknown }).result, 800);
       }
-      if (!body) return [{ kind: "text", text: t("streamer.tool_completed", lang, { tool: toolLabel }) }];
+      if (!body) return [{ kind: "tool_output", text: t("streamer.tool_completed", lang, { tool: toolLabel }), toolName: label || "mcp", formatAsCode: false }];
       return [{ kind: "tool_output", text: truncateLogLine(body, 4000) }];
     }
     if (detailsType === "file_change") {

@@ -25,6 +25,8 @@ import { PlaywrightMcpManager } from "./playwrightMcp.js";
 import { isUserLanguage, t, type UserLanguage } from "../locales/index.js";
 import { WebSocketManager } from "./websocket/manager.js";
 import { WebSocketHandler } from "./websocket/handler.js";
+import type { PreviewUrlEvent } from "./websocket/handler.js";
+import type { ServerMessage } from "./websocket/types.js";
 import { createHttpServer } from "./service/httpServer.js";
 import { readHeader, sendText } from "./service/httpUtils.js";
 
@@ -33,6 +35,8 @@ export interface BotServiceDeps {
   db: Db;
   logger: Logger;
 }
+
+export type PreviewUrlCallback = (event: PreviewUrlEvent) => void;
 
 type CloudConnectMetadata = {
   platform: "telegram" | "slack";
@@ -65,6 +69,10 @@ function parseCloudConnectMetadata(metadataJson: string | null): CloudConnectMet
 
 export async function createBotService(deps: BotServiceDeps) {
   const { config, db, logger } = deps;
+
+  // Preview URL callback (set after wsHandler is created)
+  let onPreviewUrl: PreviewUrlCallback | null = null;
+
   const slackEventStartTs = Math.floor(Date.now() / 1000);
 
   /**
@@ -379,6 +387,28 @@ export async function createBotService(deps: BotServiceDeps) {
     wsManager = new WebSocketManager(config.websocket, logger);
     wsHandler = new WebSocketHandler(wsManager, sessionManager, config, config.websocket, db, logger, cloudManager);
     wsManager.setHandler((connId, message) => wsHandler!.handleMessage(connId, message));
+
+    // Connect preview URL callback
+    onPreviewUrl = (event) => wsHandler!.pushPreviewUrl(event);
+
+    // Set up disconnect handler for sandbox termination
+    if (cloudManager && wsHandler.sandboxLifecycleService) {
+      const sandboxService = wsHandler.sandboxLifecycleService;
+      wsManager.setDisconnectHandler(async (connId, conn) => {
+        // Clean up follow-up queue entries for disconnected connection
+        wsHandler!.cloudService?.cleanupConnection(connId);
+        await sandboxService.terminateSandbox(connId, conn);
+      });
+
+      // Wire sandbox completion to follow-up queue processing
+      const cloudService = wsHandler.cloudService;
+      if (cloudService) {
+        sandboxService.setOnSessionComplete((sessionId) => {
+          void cloudService.processQueuedFollowUps(sessionId);
+        });
+      }
+    }
+
     wsManager.startHeartbeat();
     logger.info(`[ws] WebSocket enabled on path=${config.websocket.path}`);
   }

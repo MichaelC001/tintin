@@ -3,18 +3,26 @@ FROM ubuntu:24.04
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies + Chrome, then clean apt caches
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Change source - Use Alibaba Cloud mirror (compatible with Ubuntu 24.04 DEB822 format)
+RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list.d/ubuntu.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g; s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list; \
+    fi
+
+# Install curl first (required for NodeSource setup), then Node.js 20.x LTS + system dependencies + Chrome
+# Note: NodeSource setup and apt-get install must be in the same RUN to ensure correct apt sources
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+  && apt-get install -y --no-install-recommends \
   python3 \
   python3-pip \
   xvfb \
   x11vnc \
   xdotool \
   wget \
-  curl \
   git \
   nodejs \
-  npm \
   xfce4 \
   x11-xserver-utils \
   papirus-icon-theme \
@@ -40,7 +48,7 @@ RUN mkdir -p /tmp/.X11-unix \
   && chown root:root /tmp/.X11-unix \
   && chmod 1777 /tmp/.X11-unix
 
-# Install Codex + Claude Code CLIs (Node 18+ required for Claude Code)
+# Install Codex + Claude Code CLIs
 RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
   && npm cache clean --force \
   && rm -rf /root/.npm
@@ -52,6 +60,18 @@ RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 
 # Install code-server (VS Code Web)
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
   && rm -rf /root/.cache /tmp/* /var/tmp/*
+
+# Install vsda stub for VS Code remote agent compatibility
+# Fixes: "Uncaught SyntaxError: Unexpected token 'export'" in browser
+# See: docs/code-server/vsda-stub.md
+COPY vsda-stub/vsda.js /tmp/vsda.js
+COPY vsda-stub/vsda_bg.wasm /tmp/vsda_bg.wasm
+RUN mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web \
+  && mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/dist \
+  && cp /tmp/vsda.js /usr/lib/code-server/lib/vscode/node_modules/vsda/dist/vsda.js \
+  && cp /tmp/vsda_bg.wasm /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web/vsda_bg.wasm \
+  && cp /tmp/vsda.js /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web/vsda.js \
+  && rm -f /tmp/vsda.js /tmp/vsda_bg.wasm
 
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
 COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js

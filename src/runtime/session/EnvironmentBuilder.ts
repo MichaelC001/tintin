@@ -27,19 +27,11 @@ export class EnvironmentBuilder {
 
   /**
    * Add language-related environment variables.
+   * NOTE: Language directive is now in ~/.codex/AGENTS.md, not injected via env.
    */
   withLanguage(lang: UserLanguage): this {
-    const directive = t("prompt.language_directive", lang);
-    if (directive) {
-      this.env.CHATGPT_PROXY_LANGUAGE_PROMPT = directive;
-      this.env.CHATGPT_PROXY_LANGUAGE_PROMPT_B64 = Buffer.from(directive, "utf8").toString("base64");
-    }
-    this.env.CHATGPT_PROXY_LANGUAGE = lang;
-    if (!this.env.CHATGPT_PROXY_LANGUAGE_STRICT) this.env.CHATGPT_PROXY_LANGUAGE_STRICT = "1";
-    if (!this.env.CHATGPT_PROXY_LANGUAGE_CHECK) this.env.CHATGPT_PROXY_LANGUAGE_CHECK = "1";
+    // Only set the locale for system messages, not the agent prompt
     this.env.TINTIN_USER_LANGUAGE = lang;
-
-    // Set locale
     const locale = lang === "zh" ? "zh_CN.UTF-8" : "en_US.UTF-8";
     if (!this.env.LANG) this.env.LANG = locale;
     if (!this.env.LC_ALL) this.env.LC_ALL = locale;

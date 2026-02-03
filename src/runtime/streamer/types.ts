@@ -1,12 +1,20 @@
 import type { UserLanguage } from "../../locales/index.js";
 
 /**
+ * A pending tool call waiting for its output.
+ */
+export interface PendingToolCall {
+  text: string;
+  toolName: string;
+}
+
+/**
  * A fragment of streamed output from an agent session.
  */
 export type StreamFragment =
   | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
-  | { kind: "tool_call"; text: string }
-  | { kind: "tool_output"; text: string }
+  | { kind: "tool_call"; text: string; toolName?: string; toolInput?: string }
+  | { kind: "tool_output"; text: string; toolName?: string; formatAsCode?: boolean }
   | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
   | { kind: "final" };
 

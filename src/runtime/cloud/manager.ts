@@ -21,6 +21,7 @@ import { buildCloneUrl } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
+import { buildAgentsMdContent } from "./prompts.js";
 import { isUserLanguage, t, type UserLanguage } from "../../locales/index.js";
 import { buildLocalizedPrompt } from "../prompt.js";
 import {
@@ -121,6 +122,7 @@ type BrowserbaseSessionState = {
 type HyperbrowserSessionState = {
   hyperbrowserSessionId: string;
   wsEndpoint: string;
+  liveViewUrl: string | null;
   port: number;
 };
 
@@ -182,6 +184,33 @@ export class CloudManager {
 
   attachSessionManager(sessionManager: SessionManager) {
     this.sessionManager = sessionManager;
+  }
+
+  /**
+   * Stop a cloud run by killing its session and updating the run status.
+   * Returns true if the run was stopped, false if it was not running.
+   */
+  async stopCloudRun(runId: string): Promise<boolean> {
+    const run = await getCloudRun(this.db, runId);
+    if (!run) return false;
+
+    const sessionId = run.session_id;
+    if (!sessionId) return false;
+
+    // Kill the session process
+    if (this.sessionManager) {
+      try {
+        await this.sessionManager.killSession(sessionId, 'Stopped via WebSocket');
+      } catch (e) {
+        this.logger.warn(`[cloud] stopCloudRun kill session failed runId=${runId}: ${String(e)}`);
+      }
+    }
+
+    // Update run status to cancelled
+    await updateCloudRun(this.db, runId, { status: 'killed' });
+
+    this.logger.info(`[cloud] stopCloudRun runId=${runId} sessionId=${sessionId}`);
+    return true;
   }
 
   private normalizeCloudProjectId(run: CloudRunsTable): string {
@@ -343,6 +372,49 @@ export class CloudManager {
 
   async listSnapshots(identityId: string, limit?: number): Promise<CloudSnapshotsTable[]> {
     return await listSnapshotsByIdentity(this.db, { identityId, limit });
+  }
+
+  /**
+   * Detects and returns the latest snapshot ID for an identity.
+   * Used for auto-restore functionality when WebSocket reconnects.
+   *
+   * @param identityId - The identity ID to search snapshots for
+   * @param lastRunId - Optional: If provided, returns the snapshot from this specific run first
+   * @returns The snapshot ID if found, or null if no snapshots exist
+   */
+  async detectLatestSnapshot(opts: {
+    identityId: string;
+    lastRunId?: string | null;
+  }): Promise<string | null> {
+    // Priority 1: If a specific run is requested, try to get its snapshot
+    if (opts.lastRunId) {
+      const run = await getCloudRun(this.db, opts.lastRunId);
+      if (run && run.identity_id === opts.identityId && run.snapshot_id) {
+        this.logger.debug(
+          `[cloud][snapshot] detected from run runId=${opts.lastRunId} snapshotId=${run.snapshot_id}`,
+        );
+        return run.snapshot_id;
+      }
+    }
+
+    // Priority 2: Get the most recent snapshot for this identity
+    const snapshots = await listSnapshotsByIdentity(this.db, {
+      identityId: opts.identityId,
+      limit: 1,
+    });
+
+    if (snapshots.length > 0) {
+      const snap = snapshots[0]!;
+      this.logger.debug(
+        `[cloud][snapshot] detected latest for identity identityId=${opts.identityId} snapshotId=${snap.id}`,
+      );
+      return snap.id;
+    }
+
+    this.logger.debug(
+      `[cloud][snapshot] no snapshot found for identity identityId=${opts.identityId}`,
+    );
+    return null;
   }
 
   async clearSnapshots(identityId: string): Promise<number> {
@@ -726,17 +798,18 @@ export class CloudManager {
 
   private wrapAgentRelayCommand(cmd: string, opts: { sessionId: string; agent: SessionAgent; token: string; url: string }): string {
     const fifo = `/tmp/tintin-log-${opts.sessionId}.fifo`;
-    const envPrefix = [
-      `TINTIN_AGENT_URL=${shellQuote(opts.url)}`,
-      `TINTIN_AGENT_TOKEN=${shellQuote(opts.token)}`,
-      `TINTIN_AGENT_SESSION=${shellQuote(opts.sessionId)}`,
-      `TINTIN_AGENT_AGENT=${shellQuote(opts.agent)}`,
-    ].join(" ");
-    const agentCmd = `${envPrefix} tintin-log-agent`;
+    // Use export so env vars are available to both tintin-log-agent and the agent command
+    const envExports = [
+      `export TINTIN_AGENT_URL=${shellQuote(opts.url)}`,
+      `export TINTIN_AGENT_TOKEN=${shellQuote(opts.token)}`,
+      `export TINTIN_AGENT_SESSION=${shellQuote(opts.sessionId)}`,
+      `export TINTIN_AGENT_AGENT=${shellQuote(opts.agent)}`,
+    ].join("\n");
     return [
+      envExports,
       `rm -f ${shellQuote(fifo)}`,
       `mkfifo ${shellQuote(fifo)}`,
-      `${agentCmd} < ${shellQuote(fifo)} &`,
+      `tintin-log-agent < ${shellQuote(fifo)} &`,
       "AGENT_PID=$!",
       `(${cmd}) > ${shellQuote(fifo)}`,
       "CODEX_EXIT=$?",
@@ -1758,7 +1831,7 @@ export class CloudManager {
       await this.releaseHyperbrowserForSession(opts.sessionId, "replaced");
     }
 
-    let created: { id: string; wsEndpoint: string } | null = null;
+    let created: { id: string; wsEndpoint: string; liveUrl: string | null } | null = null;
     try {
       created = await createHyperbrowserSession({ config: hyperbrowser });
       const port = this.pickRemoteMcpPort(mcp);
@@ -1773,6 +1846,7 @@ export class CloudManager {
       this.hyperbrowserSessions.set(opts.sessionId, {
         hyperbrowserSessionId: created.id,
         wsEndpoint: created.wsEndpoint,
+        liveViewUrl: created.liveUrl,
         port,
       });
       await updateSession(this.db, opts.sessionId, { hyperbrowser_session_id: created.id });
@@ -1924,6 +1998,13 @@ export class CloudManager {
     }
   }
 
+  /**
+   * Get the Live View URL for a session (for iframe embedding).
+   */
+  getLiveViewUrl(sessionId: string): string | null {
+    return this.hyperbrowserSessions.get(sessionId)?.liveViewUrl ?? null;
+  }
+
   private async releaseHyperbrowserForSession(sessionId: string, reason: string): Promise<void> {
     const entry = this.hyperbrowserSessions.get(sessionId);
     if (!entry) return;
@@ -2067,6 +2148,7 @@ export class CloudManager {
             envOverrides,
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
+            language,
           }),
         `session=${sessionId} agent=${opts.agent}`,
       );
@@ -2252,6 +2334,60 @@ export class CloudManager {
     });
     if (result.exitCode !== 0) {
       throw new Error(`Failed to create remote dir ${dir}`);
+    }
+  }
+
+  /**
+   * Ensure AGENTS.md exists on the remote sandbox with all prompts and locale directive.
+   * This writes to /home/ubuntu/.codex/AGENTS.md.
+   */
+  private async ensureRemoteAgentsMd(
+    sandbox: Sandbox,
+    language: UserLanguage,
+    timeoutMs: number,
+  ): Promise<void> {
+    if (this.provider.id !== "modal") return; // Only for Modal provider
+
+    try {
+      const content = await buildAgentsMdContent(language);
+      const agentsDir = "/home/ubuntu/.codex";
+      const agentsPath = "/home/ubuntu/.codex/AGENTS.md";
+
+      // Ensure directory exists
+      await this.runRemoteCommand(sandbox, `mkdir -p ${shellQuote(agentsDir)}`, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      // Escape content for heredoc - replace $ with \$
+      const escaped = content.replace(/\$/g, "\\$");
+
+      // Write via heredoc
+      const script = `cat > ${shellQuote(agentsPath)} << 'AGENTS_EOF'
+${escaped}
+AGENTS_EOF`;
+
+      await this.runRemoteCommand(sandbox, script, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      // Set ownership
+      await this.runRemoteCommand(sandbox, `chown ubuntu:ubuntu ${shellQuote(agentsPath)}`, {
+        cwd: "/",
+        timeoutMs,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+
+      this.logger.info(`[cloud] AGENTS.md written to remote (language=${language}, bytes=${content.length})`);
+    } catch (e) {
+      this.logger.warn(`[cloud] failed to write AGENTS.md: ${String(e)}`);
+      // Continue anyway - degraded mode is acceptable
     }
   }
 
@@ -2457,6 +2593,7 @@ export class CloudManager {
     envOverrides: Record<string, string>;
     playwright?: RemotePlaywrightSetup | null;
     extraBootstrapLines?: string[] | null;
+    language: UserLanguage;
   }): Promise<{ handle: RemoteHandle; agentSessionId: string; logSyncers: RemoteLogSync[]; debug: RemoteDebug }> {
     const modal = this.getModalProvider();
     const sandbox = modal.getSandbox(opts.workspace.id);
@@ -2563,6 +2700,11 @@ export class CloudManager {
       });
     }
     cmd = `${cmd} 2> ${shellQuote(errPath)}`;
+
+    // Ensure AGENTS.md is present on the remote with all prompts
+    if (this.provider.id === "modal" && typeof sandbox.exec === "function") {
+      await this.ensureRemoteAgentsMd(sandbox, opts.language, modalCfg.request_timeout_ms);
+    }
 
     if (this.provider.id === "modal") {
       const binary = opts.agent === "claude_code" ? modalCfg.claude_binary : modalCfg.codex_binary;
@@ -3468,6 +3610,7 @@ export class CloudManager {
             envOverrides,
             playwright: playwrightSetup,
             extraBootstrapLines: guardLines,
+            language,
           }),
         `session=${session.id} agent=${session.agent}`,
       );
@@ -3560,7 +3703,11 @@ export class CloudManager {
       const tunnels = (await sandbox.tunnels(timeoutMs)) as Record<string | number, { url?: string } | undefined>;
       const vsCode = tunnels[8080];
       const url = vsCode?.url;
-      return typeof url === "string" && url.trim().length > 0 ? url : null;
+      if (typeof url === "string" && url.trim().length > 0) {
+        const workspaceRoot = this.config.cloud?.modal?.workspace_root ?? "/workspace/tintin";
+        return `${url}?folder=${encodeURIComponent(workspaceRoot)}`;
+      }
+      return null;
     } catch (e) {
       this.logger.debug(`[cloud][modal] vscode tunnel lookup failed session=${sessionId}: ${String(e)}`);
       return null;
@@ -3724,6 +3871,337 @@ export class CloudManager {
     this.agentLogPaths.delete(sessionId);
     if (this.provider.id !== "local") {
       void this.scheduleWorkspaceTermination(run.workspace_id, run.identity_id, run.id, sessionId);
+    }
+  }
+
+  // ============ Connection-Bound Workspace Methods ============
+
+  /**
+   * Create a workspace for a WebSocket connection (no agent spawn).
+   * This workspace will be reused for all cloud runs within the connection.
+   *
+   * @param opts.identityId - Database identity ID
+   * @param opts.connId - WebSocket connection ID (for logging)
+   * @returns CloudWorkspace with id and rootPath
+   */
+  async createConnectionWorkspace(opts: {
+    identityId: string;
+    connId: string;
+  }): Promise<CloudWorkspace> {
+    this.ensureEnabled();
+
+    this.logger.info(`[cloud][conn-workspace] creating workspace connId=${opts.connId} identity=${opts.identityId}`);
+
+    const workspace = await this.time(
+      "conn-workspace.create",
+      () => this.provider.createWorkspace({ prefix: "ws" }),
+      `connId=${opts.connId}`,
+    );
+
+    this.logger.info(`[cloud][conn-workspace] created id=${workspace.id} root=${workspace.rootPath} connId=${opts.connId}`);
+
+    // Record workspace lease with identity but no run
+    if (this.provider.id !== "local") {
+      await this.recordWorkspaceLease({
+        workspaceId: workspace.id,
+        runId: null,
+        identityId: opts.identityId,
+        ttlMs: this.workspaceInitialTtlMs(),
+        reason: "conn_workspace_create",
+      });
+      await this.startWorkspaceHeartbeat(workspace.id, opts.identityId, null);
+    }
+
+    // Inject secrets into .bashrc for Modal workspaces
+    if (this.provider.id === "modal") {
+      void this.time(
+        "modal.secrets.bashrc",
+        () => this.injectModalSecretsBashrc(opts.identityId, workspace),
+        `workspace=${workspace.id}`,
+      ).catch((e) => {
+        this.logger.warn(`[cloud][conn-workspace] failed to inject secrets into .bashrc: ${String(e)}`);
+      });
+    }
+
+    return workspace;
+  }
+
+  /**
+   * Terminate a connection-bound workspace.
+   * Handles stopping active runs and taking snapshots before termination.
+   *
+   * @param opts.workspaceId - Workspace ID to terminate
+   * @param opts.sessionId - Active session ID (if any)
+   * @param opts.runId - Active run ID (if any)
+   * @param opts.identityId - Owner identity ID
+   */
+  async terminateConnectionWorkspace(opts: {
+    workspaceId: string;
+    sessionId: string | null;
+    runId: string | null;
+    identityId: string;
+  }): Promise<void> {
+    this.ensureEnabled();
+
+    this.logger.info(
+      `[cloud][conn-workspace] terminating workspaceId=${opts.workspaceId} ` +
+      `sessionId=${opts.sessionId} runId=${opts.runId} identity=${opts.identityId}`,
+    );
+
+    // Stop active session if running
+    if (opts.sessionId && this.sessionManager) {
+      try {
+        await this.sessionManager.killSession(opts.sessionId, "ws_disconnect");
+        this.logger.info(`[cloud][conn-workspace] stopped session=${opts.sessionId}`);
+      } catch (e) {
+        this.logger.warn(`[cloud][conn-workspace] stop session failed: ${String(e)}`);
+      }
+    }
+
+    // Update run status if active
+    if (opts.runId) {
+      try {
+        await updateCloudRun(this.db, opts.runId, {
+          status: "killed",
+          finished_at: nowMs(),
+        });
+      } catch (e) {
+        this.logger.warn(`[cloud][conn-workspace] update run status failed: ${String(e)}`);
+      }
+    }
+
+    // Terminate the workspace (includes snapshot if Modal)
+    await this.terminateWorkspaceAndCleanup(opts.workspaceId, opts.sessionId, opts.runId);
+  }
+
+  /**
+   * Start a cloud run using an existing connection workspace.
+   * This is used when the workspace is already provisioned for the WS connection.
+   *
+   * @param opts - Run options including existing workspace
+   * @returns runId, sessionId, and cdpUrl
+   */
+  async startRunWithWorkspace(opts: {
+    workspace: CloudWorkspace;
+    identityId: string;
+    platform: string;
+    workspaceId: string | null;
+    chatId: string;
+    spaceId: string;
+    userId: string;
+    prompt: string;
+    repoIds: string[];
+    agent: SessionAgent;
+    playground?: boolean;
+    restoreSnapshotId?: string | null;
+  }): Promise<{ runId: string; sessionId: string; cdpUrl: string | null }> {
+    this.ensureEnabled();
+    const isPlayground = opts.playground === true;
+    if (opts.repoIds.length === 0 && !isPlayground) throw new Error("No repo selected.");
+    const primaryRepoId = opts.repoIds[0] ?? null;
+    const runStartMs = Date.now();
+    const runStartTs = new Date(runStartMs).toISOString();
+
+    this.logger.info(
+      `[cloud][timing] run-with-workspace start ts=${runStartTs} identity=${opts.identityId} ` +
+      `workspace=${opts.workspace.id} repos=${opts.repoIds.length} agent=${opts.agent}`,
+    );
+
+    // Use the provided workspace
+    const workspace = opts.workspace;
+
+    // Setup spec handling for snapshot restoration
+    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+    let setupSnapshotId: string | null = opts.restoreSnapshotId ?? setupSpec?.snapshot_id ?? null;
+
+    // Create run record
+    const run = await createCloudRun(this.db, {
+      identityId: opts.identityId,
+      primaryRepoId,
+      provider: this.provider.id,
+      workspaceId: workspace.id,
+      status: "queued",
+      prompt: opts.prompt,
+    });
+
+    // Update workspace lease with run ID
+    if (this.provider.id !== "local") {
+      await this.recordWorkspaceLease({
+        workspaceId: workspace.id,
+        runId: run.id,
+        identityId: opts.identityId,
+        ttlMs: this.workspaceInitialTtlMs(),
+        reason: "run_with_workspace_start",
+      });
+    }
+
+    let runStatus: "ok" | "error" = "ok";
+    let sessionId: string | null = null;
+
+    try {
+      this.logger.info(
+        `[cloud] run-with-workspace start id=${run.id} agent=${opts.agent} repos=${opts.repoIds.length} workspace=${workspace.id}`,
+      );
+
+      // Clone repositories into the workspace
+      const repoMounts: Array<{ repoId: string; mountPath: string; absPath: string }> = [];
+      if (opts.repoIds.length > 0) {
+        for (let i = 0; i < opts.repoIds.length; i++) {
+          const repoId = opts.repoIds[i]!;
+          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
+
+          const { repo, clone } = await this.time(
+            "repo.resolve",
+            () => this.resolveCloneInfo(repoId),
+            `repoId=${repoId}`,
+            "debug",
+          );
+
+          this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
+          await this.time(
+            "repo.clone",
+            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+            `repo=${repo.name}`,
+          );
+        }
+      }
+
+      // Apply setup spec if present
+      if (repoMounts.length > 0 && primaryRepoId && !setupSpec) {
+        const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
+        const specText = await readFile(specPath, "utf8").catch(() => null);
+        if (specText) {
+          const hash = hashSetupSpec(specText);
+          await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
+          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
+        }
+      }
+
+      if (setupSpec) {
+        const spec = parseSetupSpec(setupSpec.yml_blob);
+        const secrets = await this.time(
+          "secrets.load",
+          () => this.loadSecretsMap(opts.identityId),
+          `identity=${opts.identityId}`,
+          "debug",
+        );
+        const envVars: Record<string, string> = {};
+        for (const entry of spec.env ?? []) {
+          if (!entry.value) continue;
+          envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
+        }
+
+        if (spec.files && spec.files.length > 0) {
+          const files = spec.files
+            .filter((f) => f.content !== undefined)
+            .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
+          if (files.length > 0) {
+            await this.time(
+              "setupSpec.uploadFiles",
+              () => this.provider.uploadFiles(workspace, files),
+              `files=${files.length}`,
+            );
+          }
+        }
+
+        const mainRepoPath = repoMounts[0]!.absPath;
+        const commands = spec.commands ?? [];
+        if (commands.length > 0) {
+          this.logger.info(`[cloud] applying setup spec commands count=${commands.length}`);
+          await this.time(
+            "setupSpec.runCommands",
+            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands, env: envVars }),
+            `commands=${commands.length}`,
+          );
+        }
+      }
+
+      // Start the session
+      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
+      const projectId = primaryRepoId ? `cloud:${primaryRepoId}` : `cloud:playground:${run.id}`;
+
+      if (this.provider.id !== "local") {
+        this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
+        sessionId = await this.time(
+          "session.startRemote",
+          () =>
+            this.startRemoteSession({
+              identityId: opts.identityId,
+              platform: opts.platform,
+              workspaceId: opts.workspaceId,
+              chatId: opts.chatId,
+              spaceId: opts.spaceId,
+              userId: opts.userId,
+              runId: run.id,
+              projectId,
+              projectPath: mainRepoPath,
+              prompt: opts.prompt,
+              agent: opts.agent,
+              workspace,
+            }),
+          `run=${run.id}`,
+        );
+      } else {
+        if (!this.sessionManager) throw new Error("Cloud manager is not attached to session manager.");
+        const envOverrides = await this.time(
+          "env.build",
+          () => this.buildAgentEnv(opts.identityId),
+          `run=${run.id} identity=${opts.identityId}`,
+          "debug",
+        );
+        sessionId = await this.time(
+          "session.startLocal",
+          () =>
+            this.sessionManager!.startNewSession({
+              platform: opts.platform,
+              workspaceId: opts.workspaceId,
+              chatId: opts.chatId,
+              spaceId: opts.spaceId,
+              userId: opts.userId,
+              projectId,
+              projectPathResolved: mainRepoPath,
+              initialPrompt: opts.prompt,
+              agent: opts.agent,
+              envOverrides,
+            }),
+          `run=${run.id}`,
+        );
+      }
+
+      if (!sessionId) {
+        throw new Error("Session start failed.");
+      }
+
+      await updateCloudRun(this.db, run.id, {
+        status: "running",
+        session_id: sessionId,
+        started_at: nowMs(),
+        snapshot_id: setupSnapshotId ?? null,
+      });
+
+      return {
+        runId: run.id,
+        sessionId,
+        cdpUrl: this.hyperbrowserSessions.get(sessionId)?.wsEndpoint ?? null,
+      };
+    } catch (e) {
+      runStatus = "error";
+      this.logger.warn(`[cloud] run-with-workspace failed id=${run.id}: ${String(e)}`);
+      await updateCloudRun(this.db, run.id, { status: "error", finished_at: nowMs() });
+      if (sessionId) {
+        await this.releaseBrowserbaseForSession(sessionId, "run_failed").catch(() => {});
+        await this.releaseHyperbrowserForSession(sessionId, "run_failed").catch(() => {});
+      }
+      throw e;
+    } finally {
+      const runEndMs = Date.now();
+      const runEndTs = new Date(runEndMs).toISOString();
+      this.logger.info(
+        `[cloud][timing] run-with-workspace end ts=${runEndTs} id=${run.id} status=${runStatus} ms=${runEndMs - runStartMs}`,
+      );
     }
   }
 }

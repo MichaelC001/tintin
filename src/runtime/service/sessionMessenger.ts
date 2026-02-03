@@ -1,7 +1,7 @@
 import type { AppConfig } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
-import type { SendToSessionFn, SessionMessage } from "../messaging.js";
+import { isTextMessage, type SendToSessionFn, type SessionMessage } from "../messaging.js";
 import type { TelegramClient, TelegramMessage } from "../platform/telegram.js";
 import type { SlackClient } from "../platform/slack.js";
 import type { IMessagingPlatform, InteractiveMarkup } from "../platform/base.js";
@@ -493,7 +493,7 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           name: "screenshot",
           output: message.caption ?? message.filename,
         };
-      } else if (typeof message.text === "string") {
+      } else if (isTextMessage(message)) {
         wsMessage = { type: "chunk", sessionId, content: message.text };
         if (message.final) {
           wsManager.broadcastToSession(sessionId, wsMessage);
@@ -542,6 +542,10 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         deps.logger.warn(`send image failed session=${sessionId}: ${String(e)}`);
       }
       await sendToSession(sessionId, { text: `${caption}\n${t("image.saved_at", lang, { path: message.path })}`, priority: "user" });
+      return;
+    }
+    if (!isTextMessage(message)) {
+      // tool_call and tool_output are handled elsewhere or ignored for now
       return;
     }
     const text = message.text;
