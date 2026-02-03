@@ -250,8 +250,15 @@ export class ModalCloudProvider implements CloudProvider {
     const stopCmd = `if [ -f ${PREVIEW_PID_FILE} ]; then pid=$(cat ${PREVIEW_PID_FILE}); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; sleep 0.2; fi; rm -f ${PREVIEW_PID_FILE}; fi`;
     await this.runCommand(sandbox, stopCmd, { cwd: "/" });
 
-    const startCmd = `nohup socat TCP-LISTEN:${PREVIEW_PORT},fork,reuseaddr TCP:127.0.0.1:${targetPort} > /dev/null 2>&1 & echo $! > ${PREVIEW_PID_FILE}`;
+    const startCmd = `setsid socat TCP-LISTEN:${PREVIEW_PORT},fork,reuseaddr TCP:127.0.0.1:${targetPort} > /dev/null 2>&1 & echo $! > ${PREVIEW_PID_FILE}`;
     await this.runCommand(sandbox, startCmd, { cwd: "/" });
+
+    // Verify socat is running
+    const verifyCmd = `sleep 0.3; if kill -0 $(cat ${PREVIEW_PID_FILE} 2>/dev/null) 2>/dev/null; then echo ok; else echo fail; fi`;
+    const { stdout } = await this.runCommand(sandbox, verifyCmd, { cwd: "/" });
+    if (stdout.trim() !== "ok") {
+      this.logger.warn(`[cloud][modal] preview proxy socat not running after start, workspace=${workspaceId}`);
+    }
 
     this.logger.info(`[cloud][modal] preview proxy setup: ${PREVIEW_PORT} → ${targetPort}`);
   }

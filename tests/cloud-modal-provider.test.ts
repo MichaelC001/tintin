@@ -182,7 +182,7 @@ test("ModalCloudProvider setupPreviewProxy stops existing and starts new socat",
   await provider.setupPreviewProxy("sb-test", 5173);
 
   const commands = sandbox.__state.calls.map((c: any) => c.command[2]);
-  assert.equal(commands.length, 2);
+  assert.equal(commands.length, 3);
   // First command should be the stop command (checking PID file)
   assert.ok(commands[0].includes("/tmp/preview-socat.pid"));
   assert.ok(commands[0].includes("kill"));
@@ -191,6 +191,9 @@ test("ModalCloudProvider setupPreviewProxy stops existing and starts new socat",
   assert.ok(commands[1].includes("TCP-LISTEN:4100"));
   assert.ok(commands[1].includes("TCP:127.0.0.1:5173"));
   assert.ok(commands[1].includes("echo $! > /tmp/preview-socat.pid"));
+  assert.ok(commands[1].includes("setsid"));
+  // Third command should verify socat is running
+  assert.ok(commands[2].includes("kill -0"));
 });
 
 test("ModalCloudProvider setupPreviewProxy throws if sandbox missing", async () => {
