@@ -1,13 +1,20 @@
 import path from "node:path";
 import { mkdir, readFile, writeFile, open as openFile } from "node:fs/promises";
-import type { AppConfig, PlaywrightMcpBrowserbaseSection, PlaywrightMcpHyperbrowserSection, PlaywrightMcpSection } from "../config.js";
+import type { AppConfig } from "../config.js";
+import type {
+  PlaywrightMcpBrowserbaseSection,
+  PlaywrightMcpHyperbrowserSection,
+  PlaywrightMcpSection,
+} from "../mcp/providers/playwright/config.js";
 import type { CloudRunsTable, CloudSnapshotsTable, Db, ReposTable, SessionAgent, SessionStatus } from "../db.js";
 import type { Logger } from "../log.js";
 import type { SessionManager } from "../sessionManager.js";
 import { nowMs, sleep } from "../util.js";
 import { redactText } from "../redact.js";
 import type { Sandbox } from "modal";
-import type { PlaywrightServerInfo } from "../playwrightMcp.js";
+import type { McpServerInfo } from "../mcp/types.js";
+import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
+import { resolvePlaywrightProvider, resolvePlaywrightProviderEntry, type McpProviderConfig } from "../mcp/config.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
@@ -17,7 +24,7 @@ import { createBrowserbaseSession, releaseBrowserbaseSession } from "./browserba
 import { createHyperbrowserSession, stopHyperbrowserSession } from "./hyperbrowser.js";
 import { hashSetupSpec, parseSetupSpec } from "./setupSpec.js";
 import { decryptSecret, interpolateSecrets } from "./secrets.js";
-import { buildCloneUrl } from "./git.js";
+import { buildCloneUrl, buildGitAuthHeader } from "./git.js";
 import { createGithubPullRequest, ensureGithubAppToken } from "./githubApp.js";
 import { findRemoteJsonlFiles, getRemoteFileSize, RemoteLogSync } from "./modalLogs.js";
 import { createProxyToken } from "./proxy.js";
@@ -106,7 +113,7 @@ type RemoteDebug = {
 };
 
 type RemotePlaywrightSetup = {
-  server: PlaywrightServerInfo;
+  server: McpServerInfo;
   bootstrapLines: string[];
   port: number;
 };
@@ -243,7 +250,7 @@ export class CloudManager {
   private formatRemoteCommandLog(cmd: string): string {
     const flags: string[] = [];
     if (cmd.includes("tintin-chatgpt-proxy.js")) flags.push("chatgpt_proxy");
-    if (cmd.includes("@playwright/mcp")) flags.push("playwright_mcp");
+    if (cmd.includes("--mcp-config") || cmd.includes("mcp_servers.")) flags.push("mcp");
     const flagText = flags.length > 0 ? flags.join(",") : "-";
     return `bootstrap+agent len=${cmd.length} flags=${flagText}`;
   }
@@ -986,28 +993,29 @@ export class CloudManager {
       if (opts.repoIds.length > 0) {
         for (let i = 0; i < opts.repoIds.length; i++) {
           const repoId = opts.repoIds[i]!;
-          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
-          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
-          repoMounts.push({ repoId, mountPath, absPath });
-          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
           const { repo, clone } = await this.time(
             "repo.resolve",
             () => this.resolveCloneInfo(repoId),
             `repoId=${repoId}`,
             "debug",
           );
+          const repoSlug = this.normalizeRepoMountName(repo.name);
+          const mountPath = i === 0 ? path.posix.join("repo", repoSlug) : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
           if (usedSnapshot) {
             this.logger.info(`[cloud] keep snapshot repo state; set remote repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.remoteUrl",
-              () => this.ensureRepoRemote({ workspace, absPath, cloneUrl: clone.url }),
+              () => this.ensureRepoRemote({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           } else {
             this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.clone",
-              () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+              () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           }
@@ -1237,6 +1245,9 @@ export class CloudManager {
       PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
+      NODE_PATH: "/usr/lib/node_modules:/usr/local/lib/node_modules",
+      PLAYWRIGHT_BROWSERS_PATH: "/opt/playwright-browsers",
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1",
     };
     for (const [key, value] of Object.entries(base)) {
       if (!(key in env)) env[key] = value;
@@ -1393,7 +1404,9 @@ export class CloudManager {
     return this.getModalProvider();
   }
 
-  private async resolveCloneInfo(repoId: string): Promise<{ repo: any; clone: { url: string; redacted: string } }> {
+  private async resolveCloneInfo(
+    repoId: string,
+  ): Promise<{ repo: any; clone: { url: string; redacted: string; authHeader: string | null } }> {
     const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", repoId).executeTakeFirstOrThrow();
     const conn = await this.db
       .selectFrom("connections")
@@ -1413,15 +1426,44 @@ export class CloudManager {
       cloneUser = "x-access-token";
     }
     const clone = buildCloneUrl(repo.url, cloneToken, cloneUser ? { username: cloneUser } : undefined);
-    return { repo, clone };
+    const authHeader = buildGitAuthHeader(cloneToken, cloneUser);
+    return { repo, clone: { ...clone, authHeader } };
   }
 
-  private async cloneRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async resolveRepoAuthHeader(repo: ReposTable): Promise<string | null> {
+    const conn = await this.db
+      .selectFrom("connections")
+      .selectAll()
+      .where("id", "=", repo.connection_id)
+      .executeTakeFirstOrThrow();
+    let token = conn.access_token;
+    let user: string | undefined;
+    if (conn.type === "github_app" && this.config.cloud?.github_app) {
+      const appToken = await ensureGithubAppToken({
+        db: this.db,
+        config: this.config.cloud.github_app,
+        secretKey: this.config.cloud.secrets_key,
+        connection: conn,
+      });
+      token = appToken.token;
+      user = "x-access-token";
+    }
+    return buildGitAuthHeader(token, user);
+  }
+
+  private async cloneRepo(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
-      `git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
     ].join("\n");
     await this.provider.runCommands({
       workspace: opts.workspace,
@@ -1431,15 +1473,22 @@ export class CloudManager {
     });
   }
 
-  private async ensureRepoRemote(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async ensureRepoRemote(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const gitDir = path.join(opts.absPath, ".git");
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
       `if [ -d ${shellQuote(gitDir)} ]; then`,
       `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
       "else",
-      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `  ${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
       "fi",
     ].join("\n");
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
@@ -1451,18 +1500,25 @@ export class CloudManager {
     });
   }
 
-  private async refreshRepo(opts: { workspace: CloudWorkspace; absPath: string; cloneUrl: string }) {
+  private async refreshRepo(opts: {
+    workspace: CloudWorkspace;
+    absPath: string;
+    cloneUrl: string;
+    authHeader: string | null;
+  }) {
     const parentDir = path.dirname(opts.absPath);
     const gitDir = path.join(opts.absPath, ".git");
+    const authEnv = opts.authHeader ? `GIT_HTTP_EXTRAHEADER=${shellQuote(opts.authHeader)}` : "";
+    const gitAuth = opts.authHeader ? `-c http.extraheader="$GIT_HTTP_EXTRAHEADER"` : "";
     const script = [
       `mkdir -p ${shellQuote(parentDir)}`,
       `if [ -d ${shellQuote(gitDir)} ]; then`,
       `  git -C ${shellQuote(opts.absPath)} remote set-url origin ${shellQuote(opts.cloneUrl)}`,
-      `  git -C ${shellQuote(opts.absPath)} fetch --depth 1 origin`,
+      `  ${authEnv} git ${gitAuth} -C ${shellQuote(opts.absPath)} fetch --depth 1 origin`,
       "  git -C " + shellQuote(opts.absPath) + " reset --hard FETCH_HEAD",
       "  git -C " + shellQuote(opts.absPath) + " clean -fdx",
       "else",
-      `  git clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
+      `  ${authEnv} git ${gitAuth} clone --depth 1 ${shellQuote(opts.cloneUrl)} ${shellQuote(opts.absPath)}`,
       "fi",
     ].join("\n");
     const cwd = this.provider.id === "modal" ? "/" : opts.workspace.rootPath;
@@ -1496,38 +1552,136 @@ export class CloudManager {
     return args;
   }
 
-  private buildRemotePlaywrightArgs(agent: SessionAgent, serverOverride?: PlaywrightServerInfo): string[] {
+  private resolvePlaywrightConfig(): PlaywrightMcpSection | null {
+    return resolvePlaywrightProvider(this.config.mcp);
+  }
+
+  private resolvePlaywrightProviderName(): string {
+    return resolvePlaywrightProviderEntry(this.config.mcp)?.name ?? "playwright";
+  }
+
+  private normalizeRepoMountName(name: string): string {
+    const raw = name.split("/").pop() ?? name;
+    const cleaned = raw.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+    return cleaned || "repo";
+  }
+
+  private resolvePlaywrightStartupTimeoutSec(cfg: PlaywrightMcpSection): number {
+    const raw = (cfg as { startup_timeout_sec?: unknown }).startup_timeout_sec;
+    if (typeof raw === "number" && Number.isFinite(raw)) return Math.max(1, Math.floor(raw));
+    return Math.ceil(cfg.timeout_ms / 1000);
+  }
+
+  private applyMcpBootstrapEnv(env: Record<string, string>, config: McpBootstrapConfig | null): Record<string, string> {
+    if (!config || this.provider.id !== "modal") return env;
+    const out = { ...env };
+    out.TINTIN_MCP_CONFIG_B64 = encodeMcpBootstrapConfig(config);
+    return out;
+  }
+
+  private buildMcpBootstrapLines(sessionId: string, config: McpBootstrapConfig | null): string[] {
+    if (!config || this.provider.id !== "modal") return [];
+    const bin = "/usr/local/bin/tintin-mcp-bootstrap.js";
+    const logPath = `/tmp/tintin-mcp-bootstrap-${sessionId}.log`;
+    return [
+      `if [ -x ${shellQuote(bin)} ]; then`,
+      '  if [ -n "${TINTIN_MCP_CONFIG_B64:-}" ] || [ -n "${TINTIN_MCP_CONFIG_PATH:-}" ]; then',
+      `    if ! ${shellQuote(bin)} >> ${shellQuote(logPath)} 2>&1; then`,
+      '      echo "[mcp] bootstrap failed" >&2',
+      `      tail -n 200 ${shellQuote(logPath)} >&2 || true`,
+      "      exit 1",
+      "    fi",
+      "  fi",
+      "else",
+      `  echo "[mcp] missing bootstrap binary: ${bin}" >&2`,
+      "  exit 1",
+      "fi",
+    ];
+  }
+
+  private buildServerInfoFromConfig(name: string, provider: McpProviderConfig): McpServerInfo {
+    switch (provider.type) {
+      case "stdio":
+        return {
+          id: name,
+          transport: "stdio",
+          command: provider.command,
+          args: provider.args,
+          env: provider.env,
+          status: "running",
+          startupTimeoutSec: provider.startup_timeout_sec,
+        };
+      case "http":
+      case "sse":
+        return {
+          id: name,
+          transport: provider.type,
+          url: provider.url,
+          headers: provider.headers,
+          status: "running",
+          startupTimeoutSec: provider.startup_timeout_sec,
+        };
+      case "playwright":
+        return {
+          id: name,
+          transport: "http",
+          url: `http://localhost:${provider.port_start}/mcp`,
+          status: "running",
+          startupTimeoutSec: this.resolvePlaywrightStartupTimeoutSec(provider),
+        };
+      default: {
+        const unreachable: never = provider;
+        throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
+      }
+    }
+  }
+
+  private buildRemoteMcpArgs(agent: SessionAgent, serverOverride?: McpServerInfo): string[] {
     if (this.provider.id === "local") return [];
-    const cfg = this.config.playwright_mcp;
-    if (!cfg?.enabled) return [];
-    const server: PlaywrightServerInfo =
-      serverOverride ?? {
-        port: cfg.port_start,
-        url: `http://localhost:${cfg.port_start}/mcp`,
-        userDataDir: "",
-        outputDir: "",
-      };
-    const startupSec = Math.ceil(cfg.timeout_ms / 1000);
+    const mcp = this.config.mcp;
+    if (!mcp) return [];
+    const servers = new Map<string, McpServerInfo>();
+    for (const [name, provider] of Object.entries(mcp.providers)) {
+      if (!provider.enabled) continue;
+      if (provider.type === "playwright") continue;
+      servers.set(name, this.buildServerInfoFromConfig(name, provider));
+    }
+    const entry = resolvePlaywrightProviderEntry(mcp);
+    if (entry?.provider?.enabled) {
+      const providerName = entry.name;
+      const startupSec = this.resolvePlaywrightStartupTimeoutSec(entry.provider);
+      const defaultServer = this.buildServerInfoFromConfig(providerName, entry.provider);
+      const server = serverOverride
+        ? {
+            ...serverOverride,
+            id: providerName,
+            startupTimeoutSec: serverOverride.startupTimeoutSec ?? startupSec,
+          }
+        : defaultServer;
+      servers.set(providerName, server);
+    }
+    if (servers.size === 0) return [];
     const adapter = getAgentAdapter(agent);
-    return adapter.buildPlaywrightCliArgs({ server, playwrightStartupTimeoutSec: startupSec });
+    const globalTimeout = mcp.global_timeout_sec;
+    return adapter.buildMcpCliArgs({ servers, globalTimeout });
   }
 
   private isBrowserbaseEnabled(): boolean {
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "browserbase");
   }
 
   private isHyperbrowserEnabled(): boolean {
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     return this.provider.id === "modal" && Boolean(cfg?.enabled && cfg.provider === "hyperbrowser");
   }
 
   private requireBrowserbaseConfig(): { mcp: PlaywrightMcpSection; browserbase: PlaywrightMcpBrowserbaseSection } {
-    const mcp = this.config.playwright_mcp;
+    const mcp = this.resolvePlaywrightConfig();
     if (!mcp || !mcp.enabled) throw new Error("Playwright MCP is not enabled.");
     if (mcp.provider !== "browserbase") throw new Error("Playwright MCP provider is not browserbase.");
     const browserbase = mcp.browserbase;
-    if (!browserbase) throw new Error("Missing [playwright_mcp.browserbase] configuration.");
+    if (!browserbase) throw new Error("Missing [mcp.providers.playwright.browserbase] configuration.");
     if (!browserbase.api_key || !browserbase.project_id) {
       throw new Error("Browserbase config missing api_key or project_id.");
     }
@@ -1535,11 +1689,11 @@ export class CloudManager {
   }
 
   private requireHyperbrowserConfig(): { mcp: PlaywrightMcpSection; hyperbrowser: PlaywrightMcpHyperbrowserSection } {
-    const mcp = this.config.playwright_mcp;
+    const mcp = this.resolvePlaywrightConfig();
     if (!mcp || !mcp.enabled) throw new Error("Playwright MCP is not enabled.");
     if (mcp.provider !== "hyperbrowser") throw new Error("Playwright MCP provider is not hyperbrowser.");
     const hyperbrowser = mcp.hyperbrowser;
-    if (!hyperbrowser) throw new Error("Missing [playwright_mcp.hyperbrowser] configuration.");
+    if (!hyperbrowser) throw new Error("Missing [mcp.providers.playwright.hyperbrowser] configuration.");
     if (!hyperbrowser.api_key) {
       throw new Error("Hyperbrowser config missing api_key.");
     }
@@ -1547,15 +1701,7 @@ export class CloudManager {
   }
 
   private pickRemoteMcpPort(cfg: PlaywrightMcpSection): number {
-    const preferred = cfg.port_start;
-    if (preferred === 11000) {
-      if (cfg.port_end >= 11001) {
-        this.logger.warn("[cloud][playwright] port_start=11000 conflicts with the Modal image default; using port=11001");
-        return 11001;
-      }
-      this.logger.warn("[cloud][playwright] port_start=11000 may conflict with the Modal image default (11000).");
-    }
-    return preferred;
+    return cfg.port_start;
   }
 
   private buildBrowserbaseUserMetadata(
@@ -1756,7 +1902,7 @@ export class CloudManager {
       created = await createBrowserbaseSession({ config: browserbase, userMetadata: metadata });
 
       const port = this.pickRemoteMcpPort(mcp);
-      const startupTimeoutSec = Math.ceil(mcp.timeout_ms / 1000);
+      const startupTimeoutSec = this.resolvePlaywrightStartupTimeoutSec(mcp);
       const bootstrapLines = this.buildBrowserbaseBootstrapLines({
         sessionId: opts.sessionId,
         connectUrl: created.connectUrl,
@@ -1775,11 +1921,12 @@ export class CloudManager {
       this.logger.info(
         `[cloud][browserbase] session created tintin_session=${opts.sessionId} browserbase_session=${created.id} region=${browserbase.region ?? "default"} keepAlive=${browserbase.keep_alive} port=${port}`,
       );
-      const server: PlaywrightServerInfo = {
-        port,
+      const server: McpServerInfo = {
+        id: this.resolvePlaywrightProviderName(),
+        transport: "http",
         url: `http://localhost:${port}/mcp`,
-        userDataDir: "",
-        outputDir: "",
+        status: "running",
+        startupTimeoutSec,
       };
       return { server, bootstrapLines, port };
     } catch (e) {
@@ -1797,12 +1944,12 @@ export class CloudManager {
   }
 
   private buildExistingBrowserbaseSetup(sessionId: string): RemotePlaywrightSetup | null {
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     if (!cfg || !cfg.enabled || cfg.provider !== "browserbase") return null;
     const entry = this.browserbaseSessions.get(sessionId);
     if (!entry || !entry.keepAlive) return null;
     const port = entry.port;
-    const startupTimeoutSec = Math.ceil(cfg.timeout_ms / 1000);
+    const startupTimeoutSec = this.resolvePlaywrightStartupTimeoutSec(cfg);
     const bootstrapLines = this.buildBrowserbaseBootstrapLines({
       sessionId,
       connectUrl: entry.connectUrl,
@@ -1810,11 +1957,12 @@ export class CloudManager {
       startupTimeoutSec,
       config: cfg,
     });
-    const server: PlaywrightServerInfo = {
-      port,
+    const server: McpServerInfo = {
+      id: this.resolvePlaywrightProviderName(),
+      transport: "http",
       url: `http://localhost:${port}/mcp`,
-      userDataDir: "",
-      outputDir: "",
+      status: "running",
+      startupTimeoutSec,
     };
     return { server, bootstrapLines, port };
   }
@@ -1835,7 +1983,7 @@ export class CloudManager {
     try {
       created = await createHyperbrowserSession({ config: hyperbrowser });
       const port = this.pickRemoteMcpPort(mcp);
-      const startupTimeoutSec = Math.ceil(mcp.timeout_ms / 1000);
+      const startupTimeoutSec = this.resolvePlaywrightStartupTimeoutSec(mcp);
       const bootstrapLines = this.buildHyperbrowserBootstrapLines({
         sessionId: opts.sessionId,
         wsEndpoint: created.wsEndpoint,
@@ -1853,11 +2001,12 @@ export class CloudManager {
       this.logger.info(
         `[cloud][hyperbrowser] session created tintin_session=${opts.sessionId} hyperbrowser_session=${created.id} port=${port}`,
       );
-      const server: PlaywrightServerInfo = {
-        port,
+      const server: McpServerInfo = {
+        id: this.resolvePlaywrightProviderName(),
+        transport: "http",
         url: `http://localhost:${port}/mcp`,
-        userDataDir: "",
-        outputDir: "",
+        status: "running",
+        startupTimeoutSec,
       };
       return { server, bootstrapLines, port };
     } catch (e) {
@@ -1875,12 +2024,12 @@ export class CloudManager {
   }
 
   private buildExistingHyperbrowserSetup(sessionId: string): RemotePlaywrightSetup | null {
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     if (!cfg || !cfg.enabled || cfg.provider !== "hyperbrowser") return null;
     const entry = this.hyperbrowserSessions.get(sessionId);
     if (!entry) return null;
     const port = entry.port;
-    const startupTimeoutSec = Math.ceil(cfg.timeout_ms / 1000);
+    const startupTimeoutSec = this.resolvePlaywrightStartupTimeoutSec(cfg);
     const bootstrapLines = this.buildHyperbrowserBootstrapLines({
       sessionId,
       wsEndpoint: entry.wsEndpoint,
@@ -1888,11 +2037,12 @@ export class CloudManager {
       startupTimeoutSec,
       config: cfg,
     });
-    const server: PlaywrightServerInfo = {
-      port,
+    const server: McpServerInfo = {
+      id: this.resolvePlaywrightProviderName(),
+      transport: "http",
       url: `http://localhost:${port}/mcp`,
-      userDataDir: "",
-      outputDir: "",
+      status: "running",
+      startupTimeoutSec,
     };
     return { server, bootstrapLines, port };
   }
@@ -1972,7 +2122,7 @@ export class CloudManager {
     const entry = this.browserbaseSessions.get(sessionId);
     if (!entry) return;
     this.browserbaseSessions.delete(sessionId);
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     const browserbase = cfg?.browserbase;
     if (!cfg || cfg.provider !== "browserbase" || !browserbase) {
       this.logger.warn(
@@ -2009,7 +2159,7 @@ export class CloudManager {
     const entry = this.hyperbrowserSessions.get(sessionId);
     if (!entry) return;
     this.hyperbrowserSessions.delete(sessionId);
-    const cfg = this.config.playwright_mcp;
+    const cfg = this.resolvePlaywrightConfig();
     const hyperbrowser = cfg?.hyperbrowser;
     if (!cfg || cfg.provider !== "hyperbrowser" || !hyperbrowser) {
       this.logger.warn(`[cloud][hyperbrowser] release skipped session=${sessionId} reason=${reason} (missing config)`);
@@ -2611,8 +2761,8 @@ AGENTS_EOF`;
     let relayLogPath: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
-    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent, opts.playwright?.server) : [];
+    const mcpArgs = this.buildRemoteMcpArgs(opts.agent, opts.playwright?.server);
+    const mcpEnabled = mcpArgs.length > 0;
     const localLogPaths: string[] = [];
 
     if (opts.agent === "claude_code") {
@@ -2622,8 +2772,8 @@ AGENTS_EOF`;
       configDir = resolvedConfigDir;
       const baseArgs = this.buildClaudeArgs(agentSessionId);
       const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
-      if (mcpEnabled && playwrightArgs.length > 0) {
-        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+      if (mcpEnabled && mcpArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...mcpArgs];
         const mcpCmd = `${modalCfg.claude_binary} ${argsWithMcp.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
         cmd = mcpCmd;
       } else {
@@ -2640,8 +2790,8 @@ AGENTS_EOF`;
       codexHome = toPosix(homeDir);
       const baseArgs = this.buildCodexArgs(opts.cwd);
       const baseCmd = `${modalCfg.codex_binary} ${baseArgs.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
-      if (mcpEnabled && playwrightArgs.length > 0) {
-        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+      if (mcpEnabled && mcpArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...mcpArgs];
         const mcpCmd = `${modalCfg.codex_binary} ${argsWithMcp.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
         cmd = mcpCmd;
       } else {
@@ -2654,10 +2804,14 @@ AGENTS_EOF`;
       };
     }
 
+    const mcpBootstrapConfig = buildMcpBootstrapConfig(this.config.mcp ?? null);
+    env = this.applyMcpBootstrapEnv(env, mcpBootstrapConfig);
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
+    const mcpBootstrapLines = this.buildMcpBootstrapLines(opts.sessionId, mcpBootstrapConfig);
     const combinedExtraLines = [
       ...(opts.extraBootstrapLines ?? []),
+      ...mcpBootstrapLines,
       ...(opts.playwright?.bootstrapLines ?? []),
       ...chatgptLines,
     ];
@@ -2896,8 +3050,9 @@ AGENTS_EOF`;
     let relayConfig: { token: string; url: string } | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const mcpEnabled = this.provider.id === "modal" && this.config.playwright_mcp?.enabled;
-    const playwrightArgs = mcpEnabled ? this.buildRemotePlaywrightArgs(opts.agent, opts.playwright?.server) : [];
+    const playwrightCfg = this.resolvePlaywrightConfig();
+    const mcpArgs = this.buildRemoteMcpArgs(opts.agent, opts.playwright?.server);
+    const mcpEnabled = mcpArgs.length > 0;
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
@@ -2906,8 +3061,8 @@ AGENTS_EOF`;
       configDir = resolvedConfigDir;
       const baseArgs = this.buildClaudeResumeArgs(opts.agentSessionId);
       const baseCmd = `${modalCfg.claude_binary} ${baseArgs.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
-      if (mcpEnabled && playwrightArgs.length > 0) {
-        const argsWithMcp = [...baseArgs, ...playwrightArgs];
+      if (mcpEnabled && mcpArgs.length > 0) {
+        const argsWithMcp = [...baseArgs, ...mcpArgs];
         const mcpCmd = `${modalCfg.claude_binary} ${argsWithMcp.map(shellQuote).join(" ")} < ${shellQuote(promptFile)}`;
         cmd = mcpCmd;
       } else {
@@ -2923,7 +3078,7 @@ AGENTS_EOF`;
       const homeDir = resolveCodexHomeFromSessionsRoot(sessionsRoot);
       codexHome = toPosix(homeDir);
       const baseArgs = this.buildCodexArgs(opts.cwd);
-      const extraArgs = mcpEnabled && playwrightArgs.length > 0 ? playwrightArgs : [];
+      const extraArgs = mcpEnabled && mcpArgs.length > 0 ? mcpArgs : [];
       const args = [...baseArgs, ...extraArgs, "resume", opts.agentSessionId];
       cmd = `${modalCfg.codex_binary} ${args.map(shellQuote).join(" ")} - < ${shellQuote(promptFile)}`;
       env = {
@@ -2933,10 +3088,14 @@ AGENTS_EOF`;
       };
     }
 
+    const mcpBootstrapConfig = buildMcpBootstrapConfig(this.config.mcp ?? null);
+    env = this.applyMcpBootstrapEnv(env, mcpBootstrapConfig);
     env = this.ensureModalEnv(env);
     const chatgptLines = this.buildChatgptProxyLines(env);
+    const mcpBootstrapLines = this.buildMcpBootstrapLines(opts.sessionId, mcpBootstrapConfig);
     const combinedExtraLines = [
       ...(opts.extraBootstrapLines ?? []),
+      ...mcpBootstrapLines,
       ...(opts.playwright?.bootstrapLines ?? []),
       ...chatgptLines,
     ];
@@ -2968,10 +3127,11 @@ AGENTS_EOF`;
     this.logger.info(
       `[cloud] env check openai_key=${openaiKeyLen > 0 ? `len=${openaiKeyLen}` : "missing"} openai_base=${openaiBase || "(none)"} openai_auth=${openaiAuth.source}${authAccount} anthropic_key=${anthropicKeyLen > 0 ? `len=${anthropicKeyLen}` : "missing"} anthropic_base=${anthropicBase || "(none)"}`,
     );
-    if (mcpEnabled) {
-      const mcpPort = opts.playwright?.port ?? this.config.playwright_mcp!.port_start;
+    if (playwrightCfg?.enabled) {
+      const mcpPort = opts.playwright?.port ?? playwrightCfg.port_start;
+      const startupTimeoutSec = this.resolvePlaywrightStartupTimeoutSec(playwrightCfg);
       this.logger.info(
-        `[cloud] playwright mcp enabled (startup_timeout=${this.config.playwright_mcp!.timeout_ms}ms, port=${mcpPort})`,
+        `[cloud] playwright mcp enabled (startup_timeout=${startupTimeoutSec * 1000}ms, port=${mcpPort})`,
       );
     }
 
@@ -3465,14 +3625,14 @@ AGENTS_EOF`;
             this.logger.info(`[cloud] refresh repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.refresh",
-              () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              () => this.refreshRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           } else {
             this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
             await this.time(
               "repo.clone",
-              () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url }),
+              () => this.cloneRepo({ workspace, absPath: mount.absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
               `repo=${repo.name}`,
             );
           }
@@ -3669,6 +3829,11 @@ AGENTS_EOF`;
     return { owner: match[1]!, repo: match[2]! };
   }
 
+  private buildGitExtraHeaderArgs(repoUrl: string): string[] {
+    void repoUrl;
+    return [`-c http.extraheader="$GIT_HTTP_EXTRAHEADER"`];
+  }
+
   private async resolveRunRepo(sessionId: string): Promise<{
     run: CloudRunsTable;
     repo: ReposTable;
@@ -3764,6 +3929,7 @@ AGENTS_EOF`;
   }): Promise<{ runId: string; branchName: string; repo: ReposTable }> {
     this.ensureEnabled();
     const { run, repo, workspace, cwd } = await this.resolveRunRepo(opts.sessionId);
+    const authHeader = await this.resolveRepoAuthHeader(repo);
     const message = (opts.commitMessage ?? "").trim();
     if (!message) throw new Error("Commit message is empty.");
     const branchName = (opts.branchName ?? "").trim();
@@ -3771,6 +3937,35 @@ AGENTS_EOF`;
     const authorName = (opts.gitUserName ?? "").trim() || "tintin[bot]";
     const authorEmail = (opts.gitUserEmail ?? "").trim() || "tintin@fuzz.land";
     const singleLine = message.split(/\r?\n/)[0]?.trim() || message;
+    const stageScript = [
+      "const { execFileSync, execSync } = require('child_process');",
+      "const fs = require('fs');",
+      "execSync('git add -u', { stdio: 'inherit' });",
+      "const list = execSync('git ls-files --others --exclude-standard', { encoding: 'utf8' })",
+      "  .split('\\n')",
+      "  .map((l) => l.trim())",
+      "  .filter(Boolean);",
+      "let blocked = false;",
+      "for (const file of list) {",
+      "  const norm = file.replace(/\\\\/g, '/');",
+      "  if (norm === 'node_modules' || norm.startsWith('node_modules/')) continue;",
+      "  if (norm.includes('/node_modules/')) continue;",
+      "  if ((norm === 'package.json' || norm === 'package-lock.json') && fs.existsSync(file)) {",
+      "    const txt = fs.readFileSync(file, 'utf8');",
+      "    if (txt.includes('x-access-token:')) {",
+      "      console.error('refusing to stage ' + file + ' containing access token');",
+      "      blocked = true;",
+      "      continue;",
+      "    }",
+      "  }",
+      "  execFileSync('git', ['add', '--', file], { stdio: 'inherit' });",
+      "}",
+      "if (blocked) process.exit(2);",
+    ].join("\n");
+    const stageScriptPath = "/tmp/tintin-stage.js";
+    const gitAuth = authHeader ? this.buildGitExtraHeaderArgs(repo.url).join(" ") : "";
+    const env: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+    if (authHeader) env.GIT_HTTP_EXTRAHEADER = authHeader;
     await this.provider.runCommands({
       workspace,
       cwd,
@@ -3778,10 +3973,12 @@ AGENTS_EOF`;
         `git config user.name ${shellQuote(authorName)}`,
         `git config user.email ${shellQuote(authorEmail)}`,
         `git checkout -B ${shellQuote(branchName)}`,
-        "git add -A",
+        `cat <<'EOF' > ${shellQuote(stageScriptPath)}\n${stageScript}\nEOF`,
+        `node ${shellQuote(stageScriptPath)}`,
         `git commit -m ${shellQuote(singleLine)}`,
-        `git push -u origin ${shellQuote(branchName)}`,
+        `git ${gitAuth} push -u origin ${shellQuote(branchName)}`,
       ],
+      env,
     });
     return { runId: run.id, branchName, repo };
   }
@@ -4048,22 +4245,22 @@ AGENTS_EOF`;
       if (opts.repoIds.length > 0) {
         for (let i = 0; i < opts.repoIds.length; i++) {
           const repoId = opts.repoIds[i]!;
-          const mountPath = i === 0 ? path.posix.join("repo", "main") : path.posix.join("repo", `dep${i}`);
-          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
-          repoMounts.push({ repoId, mountPath, absPath });
-          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
-
           const { repo, clone } = await this.time(
             "repo.resolve",
             () => this.resolveCloneInfo(repoId),
             `repoId=${repoId}`,
             "debug",
           );
+          const repoSlug = this.normalizeRepoMountName(repo.name);
+          const mountPath = i === 0 ? path.posix.join("repo", repoSlug) : path.posix.join("repo", `dep${i}`);
+          const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+          repoMounts.push({ repoId, mountPath, absPath });
+          await addRunRepo(this.db, { runId: run.id, repoId, mountPath });
 
           this.logger.info(`[cloud] clone repo=${repo.name} url=${clone.redacted}`);
           await this.time(
             "repo.clone",
-            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url }),
+            () => this.cloneRepo({ workspace, absPath, cloneUrl: clone.url, authHeader: clone.authHeader }),
             `repo=${repo.name}`,
           );
         }
