@@ -80,7 +80,6 @@ function createFakeSandbox(execHandler?: (command: string[], params: any) => Exe
       killed = true;
     },
     snapshotFilesystem: async () => ({ imageId: "im-snap" }),
-    tunnels: async () => ({}),
     __state: {
       files,
       calls,
