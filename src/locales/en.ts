@@ -169,6 +169,9 @@ export const en = {
   "cloud.config_missing": "Cloud config is missing.",
   "cloud.public_base_missing": "Cloud public base URL is not configured.",
   "cloud.secrets_missing": "Cloud secrets key is not configured.",
+  "mcp.github_token.usage_set": "Usage: {cmd}",
+  "mcp.github_token.saved": "GitHub MCP token saved.",
+  "mcp.github_token.save_failed": "Failed to save GitHub MCP token: {error}",
   "cloud.setup_required": "Cloud setup required. Please connect in a direct message first.",
   "cloud.ui_token_missing": "Cloud UI token is not configured.",
 
@@ -179,6 +182,7 @@ export const en = {
   "cloud.help.cmd.connect_chatgpt": "- {cmd} connect ChatGPT",
   "cloud.help.cmd.connect_chatgpt_status": "- {cmd} check ChatGPT status",
   "cloud.help.cmd.connect_chatgpt_revoke": "- {cmd} revoke ChatGPT connection",
+  "cloud.help.cmd.mcp_github_token": "- {cmd} set your GitHub MCP token",
   "cloud.help.cmd.connect_github": "- {cmd} (GitHub) / {cmd2} (GitLab) / {cmd3} (local)",
   "cloud.help.step_pick_repos": "2) Pick repositories",
   "cloud.help.cmd.repos": "- {cmd} list repos (use {cmd2} to search)",

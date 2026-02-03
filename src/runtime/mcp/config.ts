@@ -1,7 +1,7 @@
 import { McpConfigSchema, type McpLogLevel } from "./schemas.js";
 import { normalizePlaywrightMcpSection, type PlaywrightMcpSection } from "./providers/playwright/config.js";
 
-export type McpProviderType = "stdio" | "http" | "sse" | "playwright";
+export type McpProviderType = "stdio" | "http" | "sse" | "playwright" | "github";
 
 export interface BaseMcpProviderConfig {
   enabled: boolean;
@@ -20,6 +20,7 @@ export interface HttpMcpProviderConfig extends BaseMcpProviderConfig {
   type: "http" | "sse";
   url: string;
   headers: Record<string, string>;
+  bearer_token_env_var?: string;
 }
 
 export interface PlaywrightMcpProviderConfig extends BaseMcpProviderConfig, PlaywrightMcpSection {
@@ -27,7 +28,17 @@ export interface PlaywrightMcpProviderConfig extends BaseMcpProviderConfig, Play
   startup_timeout_sec: number;
 }
 
-export type McpProviderConfig = StdioMcpProviderConfig | HttpMcpProviderConfig | PlaywrightMcpProviderConfig;
+export interface GitHubMcpProviderConfig extends BaseMcpProviderConfig {
+  type: "github";
+  github_host?: string;
+  toolsets?: string[];
+}
+
+export type McpProviderConfig =
+  | StdioMcpProviderConfig
+  | HttpMcpProviderConfig
+  | PlaywrightMcpProviderConfig
+  | GitHubMcpProviderConfig;
 
 export interface McpConfig {
   global_timeout_sec: number;
