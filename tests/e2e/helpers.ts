@@ -28,7 +28,7 @@ function parseSqliteFilePath(sqliteUrl: string, baseDir: string): string {
 
 // Type for ws library WebSocket (Node.js, not browser)
 // Import the type from the ws package
-import type { WebSocket as WebSocketWs } from "ws";
+import type { WebSocket as WebSocketWs, RawData } from "ws";
 
 export interface E2EConfig {
   wsUrl: string;
@@ -131,7 +131,7 @@ export class WebSocketClient {
         reject(new Error(`WebSocket error: ${err.message}`));
       });
 
-      this.ws.on("message", (data: Buffer) => {
+      this.ws.on("message", (data: RawData) => {
         try {
           const msg = JSON.parse(data.toString());
 

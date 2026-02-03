@@ -39,7 +39,7 @@ export class WebSocketManager {
       return;
     }
 
-    this.wss.handleUpgrade(req, socket, head, (ws) => {
+    this.wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
       this.handleConnection(ws, req);
     });
   }
@@ -81,12 +81,12 @@ export class WebSocketManager {
       void this.handleMessage(conn, data, authTimeout);
     });
 
-    ws.on('close', (code, reason) => {
+    ws.on("close", (code: number, reason: Buffer) => {
       clearTimeout(authTimeout);
       this.handleClose(conn, code, reason.toString());
     });
 
-    ws.on('error', (err) => {
+    ws.on("error", (err: Error) => {
       this.logger.warn(`[ws] connection error id=${connId}: ${String(err)}`);
     });
 

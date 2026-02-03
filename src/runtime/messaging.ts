@@ -3,13 +3,15 @@ export interface PlanUpdateItem {
   status: string;
 }
 
+export type TextMessage = {
+  type?: "text";
+  text: string;
+  final?: boolean;
+  priority?: "user" | "background";
+};
+
 export type SessionMessage =
-  | {
-      type?: "text";
-      text: string;
-      final?: boolean;
-      priority?: "user" | "background";
-    }
+  | TextMessage
   | {
       type: "finalize";
       priority?: "user" | "background";
@@ -43,5 +45,10 @@ export type SessionMessage =
       formatAsCode?: boolean;
       priority?: "user" | "background";
     };
+
+/** Type guard to check if a SessionMessage is a text message */
+export function isTextMessage(message: SessionMessage): message is TextMessage {
+  return message.type === undefined || message.type === "text";
+}
 
 export type SendToSessionFn = (sessionId: string, message: SessionMessage) => Promise<void>;
