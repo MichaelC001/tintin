@@ -75,6 +75,7 @@ function createFakeSandbox(execHandler?: (command: string[], params: any) => Exe
       calls.push({ command, params });
       return execHandler ? execHandler(command, params) : makeProc();
     },
+    tunnels: async () => ({}),
     terminate: async () => {
       killed = true;
     },

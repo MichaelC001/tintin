@@ -1,69 +1,120 @@
 FROM ubuntu:24.04
 
-# Prevent interactive prompts during package installation
+SHELL ["/bin/bash", "-euxo", "pipefail", "-c"]
 ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
-# Change source - Use Alibaba Cloud mirror (compatible with Ubuntu 24.04 DEB822 format)
-RUN if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-      sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g; s|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g' /etc/apt/sources.list.d/ubuntu.sources; \
-    elif [ -f /etc/apt/sources.list ]; then \
-      sed -i 's|http://ports.ubuntu.com/ubuntu-ports|http://mirrors.aliyun.com/ubuntu-ports|g; s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g' /etc/apt/sources.list; \
-    fi
+# Configure Aliyun mirror (HTTP) for Ubuntu 24.04 using DEB822 format.
+RUN cat <<'EOF' > /etc/apt/sources.list.d/ubuntu.sources
+Types: deb
+URIs: http://mirrors.aliyun.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
 
-# Install curl first (required for NodeSource setup), then Node.js 20.x LTS + system dependencies + Chrome
-# Note: NodeSource setup and apt-get install must be in the same RUN to ensure correct apt sources
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-  && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+Types: deb
+URIs: http://mirrors.aliyun.com/ubuntu/
+Suites: noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+# Install base networking and crypto tools.
+RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-  python3 \
-  python3-pip \
-  xvfb \
-  x11vnc \
-  xdotool \
-  wget \
-  git \
-  nodejs \
-  xfce4 \
-  x11-xserver-utils \
-  papirus-icon-theme \
-  arc-theme \
-  fonts-noto \
-  fonts-noto-color-emoji \
-  ripgrep \
-  build-essential \
-  dbus-x11 \
-  colord \
-  socat \
-  scrot \
-  sudo \
-  tmux \
-  && wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+    ca-certificates \
+    curl \
+    gnupg \
+    wget \
+  && rm -rf /var/lib/apt/lists/*
+
+# Add NodeSource repository.
+RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+  | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+  && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+  > /etc/apt/sources.list.d/nodesource.list
+
+# Base OS packages: GUI stack, tooling, and runtime prerequisites.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    git \
+    nodejs \
+    xvfb \
+    x11vnc \
+    xdotool \
+    xfce4 \
+    x11-xserver-utils \
+    papirus-icon-theme \
+    arc-theme \
+    fonts-noto \
+    fonts-noto-color-emoji \
+    ripgrep \
+    build-essential \
+    dbus-x11 \
+    colord \
+    socat \
+    scrot \
+    sudo \
+    tmux \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install Chrome separately.
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb \
+  && apt-get update \
   && apt-get install -y --no-install-recommends /tmp/chrome.deb \
-  && apt-get -y -f install \
   && rm -f /tmp/chrome.deb \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/*
+
+# Reduce image size by removing docs and caches.
+RUN rm -rf /usr/share/doc/* /usr/share/man/* /usr/share/locale/* /var/cache/apt/* /tmp/* /var/tmp/*
 
 RUN mkdir -p /tmp/.X11-unix \
   && chown root:root /tmp/.X11-unix \
   && chmod 1777 /tmp/.X11-unix
 
-# Install Codex + Claude Code CLIs
-RUN npm i -g @openai/codex @anthropic-ai/claude-code @playwright/mcp \
+# MCP toolchain: install all MCP-related npm packages at build time.
+# Extend by editing MCP_NPM_PACKAGES (no runtime installs).
+ARG PLAYWRIGHT_MCP_PACKAGE=@playwright/mcp@latest
+ARG MCP_NPM_PACKAGES="${PLAYWRIGHT_MCP_PACKAGE}"
+ENV MCP_NPM_PACKAGES=${MCP_NPM_PACKAGES}
+ENV TINTIN_PLAYWRIGHT_MCP_PACKAGE=${PLAYWRIGHT_MCP_PACKAGE}
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+# Ensure globally installed Node modules are resolvable at runtime.
+ENV NODE_PATH=/usr/lib/node_modules:/usr/local/lib/node_modules
+# Explicit install at build time; runtime downloads disabled.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN npm config set fund false \
+  && npm config set audit false \
+  && npm config set update-notifier false \
+  && npm i -g @openai/codex ${MCP_NPM_PACKAGES} \
+  && NPM_ROOT="$(npm root -g)" \
+  && PW_VERSION="$(NODE_PATH="${NPM_ROOT}" node -e "const pkg=require('@playwright/mcp/package.json'); const deps=pkg.dependencies || {}; process.stdout.write(deps.playwright || deps['playwright-core'] || '');")" \
+  && if [ -z "${PW_VERSION}" ]; then \
+    echo "Unable to detect Playwright version from @playwright/mcp; aborting build." >&2; \
+    exit 1; \
+  fi \
+  && npm i -g "playwright@${PW_VERSION}" \
+  && echo "Preinstalling Playwright browsers for ${PW_VERSION}" \
+  && mkdir -p "${PLAYWRIGHT_BROWSERS_PATH}" \
+  && PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH}" npx --yes "playwright@${PW_VERSION}" install --with-deps \
+  && chmod -R 755 "${PLAYWRIGHT_BROWSERS_PATH}" \
   && npm cache clean --force \
-  && rm -rf /root/.npm
+  && rm -rf /root/.npm /root/.cache /tmp/* /var/tmp/*
 
-# Install ttyd
+# Claude Code (official installer).
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# Auxiliary tools.
 RUN wget -q https://github.com/tsl0922/ttyd/releases/download/1.7.3/ttyd.x86_64 -O /usr/local/bin/ttyd \
   && chmod +x /usr/local/bin/ttyd
-
-# Install code-server (VS Code Web)
 RUN curl -fsSL https://code-server.dev/install.sh | sh \
   && rm -rf /root/.cache /tmp/* /var/tmp/*
 
-# Install vsda stub for VS Code remote agent compatibility
-# Fixes: "Uncaught SyntaxError: Unexpected token 'export'" in browser
-# See: docs/code-server/vsda-stub.md
+# VS Code remote agent compatibility (vsda stub).
 COPY vsda-stub/vsda.js /tmp/vsda.js
 COPY vsda-stub/vsda_bg.wasm /tmp/vsda_bg.wasm
 RUN mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web \
@@ -76,27 +127,35 @@ RUN mkdir -p /usr/lib/code-server/lib/vscode/node_modules/vsda/rust/web \
 COPY tintin-log-agent.js /usr/local/bin/tintin-log-agent
 COPY tintin-chatgpt-proxy.js /usr/local/bin/tintin-chatgpt-proxy.js
 COPY tintin-helper-lib.js /usr/local/bin/tintin-helper-lib.js
+COPY tintin-mcp-bootstrap.js /usr/local/bin/tintin-mcp-bootstrap.js
 COPY code /usr/local/bin/code
 COPY site /usr/local/bin/site
 COPY static-deploy /usr/local/bin/static-deploy
 COPY dynamic-deploy /usr/local/bin/dynamic-deploy
-RUN chmod +x /usr/local/bin/tintin-log-agent /usr/local/bin/tintin-chatgpt-proxy.js /usr/local/bin/code /usr/local/bin/site /usr/local/bin/static-deploy /usr/local/bin/dynamic-deploy
+RUN chmod +x \
+  /usr/local/bin/tintin-log-agent \
+  /usr/local/bin/tintin-chatgpt-proxy.js \
+  /usr/local/bin/tintin-mcp-bootstrap.js \
+  /usr/local/bin/code \
+  /usr/local/bin/site \
+  /usr/local/bin/static-deploy \
+  /usr/local/bin/dynamic-deploy
 
-RUN mkdir -p /home/ubuntu/.image
-RUN chown -R ubuntu:ubuntu /home/ubuntu
-RUN chown -R ubuntu:ubuntu /home/ubuntu/.image
-RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu && chmod 0440 /etc/sudoers.d/ubuntu
+RUN id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu \
+  && mkdir -p /home/ubuntu/.image \
+  && chown -R ubuntu:ubuntu /home/ubuntu \
+  && echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu \
+  && chmod 0440 /etc/sudoers.d/ubuntu \
+  && chsh -s /bin/bash ubuntu
+
 USER ubuntu
 
-# Add .local/bin to PATH
 ENV PATH="/home/ubuntu/.local/bin:${PATH}"
-
-# Set up display environment variables
 ENV DISPLAY=:99
 ENV WIDTH=1920
 ENV HEIGHT=1080
 
-# Configure XFCE theme
+# Configure XFCE theme.
 RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml \
   && cat <<'XML' > /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -131,7 +190,7 @@ RUN mkdir -p /home/ubuntu/.config/xfce4/xfconf/xfce-perchannel-xml \
 </channel>
 XML
 
-# Create startup script
+# Create startup script.
 RUN cat <<'SCRIPT' > /home/ubuntu/start.sh
 #!/usr/bin/env bash
 
@@ -227,11 +286,11 @@ if command -v dbus-launch >/dev/null 2>&1; then
 fi
 
 if [ "$XVFB_READY" -eq 1 ]; then
-  # Start XFCE session
+  # Start XFCE session.
   step_bg "XFCE" startxfce4 >/home/ubuntu/xfce.log 2>&1
   step "XFCE warmup" sleep 2
 
-  # Set theme and appearance (best-effort)
+  # Set theme and appearance (best-effort).
   t_theme_start=$SECONDS
   log "start: XFCE theme"
   xfconf-query -c xsettings -p /Net/ThemeName -s "Arc-Dark" >/dev/null 2>&1 || true
@@ -264,7 +323,7 @@ if command -v dbus-daemon >/dev/null 2>&1; then
   log "done: dbus-daemon rc=$? dt=$((SECONDS - t_dbusd_start))s"
 fi
 
-# Start Chrome CDP endpoint
+# Start Chrome CDP endpoint.
 CHROME_ARGS=(
   --no-sandbox
   --disable-setuid-sandbox
@@ -280,25 +339,8 @@ if [ "$XVFB_READY" -ne 1 ]; then
 fi
 step_bg "Chrome" google-chrome "${CHROME_ARGS[@]}"
 
-# Forward CDP port
+# Forward CDP port.
 step_bg "CDP forward" socat TCP-LISTEN:9223,fork,reuseaddr TCP:127.0.0.1:9222
-
-# Start Playwright MCP connected to CDP
-PLAYWRIGHT_MCP_PORT=${PLAYWRIGHT_MCP_PORT:-11000}
-CDP_URL=""
-t_cdp_start=$SECONDS
-log "start: CDP discovery"
-for i in $(seq 1 15); do
-  CDP_URL=$(curl -s http://127.0.0.1:9222/json/version | sed -n 's/.*"webSocketDebuggerUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-  if [ -n "$CDP_URL" ]; then break; fi
-  sleep 1
-done
-log "done: CDP discovery found=$([ -n "$CDP_URL" ] && echo yes || echo no) dt=$((SECONDS - t_cdp_start))s"
-if [ -n "$CDP_URL" ]; then
-  step_bg "Playwright MCP (CDP)" npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --cdp-endpoint "$CDP_URL" --shared-browser-context
-else
-  step_bg "Playwright MCP (no CDP)" npx -y @playwright/mcp@latest --host 127.0.0.1 --port ${PLAYWRIGHT_MCP_PORT} --browser chromium --shared-browser-context
-fi
 
 if [ "$XVFB_READY" -eq 1 ] && [ "$ENABLE_VNC" = "1" ]; then
   step_bg "x11vnc" x11vnc -display "${DISPLAY}" -forever -nopw -shared >/home/ubuntu/.image/x11vnc.log 2>&1
@@ -306,7 +348,7 @@ fi
 step_bg "code-server" code-server --auth none --bind-addr 0.0.0.0:8080
 step_bg "ttyd" ttyd -p 7681 bash
 
-# Keep container alive
+# Keep container alive.
 log "startup complete; entering sleep"
 sleep infinity
 SCRIPT
