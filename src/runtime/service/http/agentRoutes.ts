@@ -381,7 +381,57 @@ export async function handleAgentRoutes(params: {
         sendAgentText(400, "missing summary", { method: req.method ?? "", path: pathname, body });
         return true;
       }
+
+      // Setup preview proxy and get tunnel URL for Modal provider
+      let previewUrl = "";
+      if (deps.cloudManager?.getProviderId() === "modal") {
+        const sessionRow = await db
+          .selectFrom("sessions")
+          .select(["workspace_id"])
+          .where("id", "=", ctx.sessionId)
+          .executeTakeFirst();
+
+        if (sessionRow?.workspace_id) {
+          const modal = deps.cloudManager.getModalProviderForDeploy();
+
+          // Setup socat proxy
+          try {
+            await modal.setupPreviewProxy(sessionRow.workspace_id, port);
+          } catch (e) {
+            logger.warn(`[site/add] preview proxy setup failed session=${ctx.sessionId}: ${String(e)}`);
+          }
+
+          // Get tunnel URL for preview port
+          try {
+            const sandbox = await modal.getSandboxHandle(sessionRow.workspace_id);
+            previewUrl = await resolveModalTunnelUrl(sandbox, modal.getPreviewPort());
+          } catch (e) {
+            logger.warn(`[site/add] tunnel URL resolve failed session=${ctx.sessionId}: ${String(e)}`);
+          }
+        }
+      }
+
+      // Push preview URL via WebSocket
+      if (previewUrl && deps.wsManager) {
+        const cloudRun = await db
+          .selectFrom("cloud_runs")
+          .select(["id"])
+          .where("session_id", "=", ctx.sessionId)
+          .executeTakeFirst();
+
+        if (cloudRun) {
+          deps.wsManager.broadcastToSession(ctx.sessionId, {
+            type: "run_links",
+            runId: cloudRun.id,
+            sessionId: ctx.sessionId,
+            previewUrl,
+            previewSummary: summary,
+          });
+        }
+      }
+
       const entry = await createSiteRegistryEntry(db, { identityId: ctx.identityId, port, path: sitePath, summary });
+      const url = previewUrl || buildLocalSiteUrl(entry.port, entry.path);
       sendAgentJson(
         200,
         {
@@ -389,7 +439,7 @@ export async function handleAgentRoutes(params: {
           port: entry.port,
           path: entry.path,
           summary: entry.summary,
-          url: buildLocalSiteUrl(entry.port, entry.path),
+          url,
         },
         { method: req.method ?? "", path: pathname, body },
       );

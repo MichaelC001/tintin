@@ -9,6 +9,11 @@ function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+const CODE_SERVER_PORT = 8080;
+const DEVTOOLS_PORT = 9223;
+const PREVIEW_PORT = 4100;
+const PREVIEW_PID_FILE = "/tmp/preview-socat.pid";
+
 function shellQuote(value: string): string {
   return JSON.stringify(value);
 }
@@ -229,6 +234,32 @@ export class ModalCloudProvider implements CloudProvider {
     this.sandboxes.delete(workspace.id);
   }
 
+  async setupPreviewProxy(workspaceId: string, targetPort: number): Promise<void> {
+    const sandbox = await this.getOrFetchSandbox(workspaceId);
+    if (!sandbox) throw new Error(`Missing sandbox for workspace ${workspaceId}`);
+
+    const stopCmd = `if [ -f ${PREVIEW_PID_FILE} ]; then pid=$(cat ${PREVIEW_PID_FILE}); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; sleep 0.2; fi; rm -f ${PREVIEW_PID_FILE}; fi`;
+    await this.runCommand(sandbox, stopCmd, { cwd: "/" });
+
+    const startCmd = `nohup socat TCP-LISTEN:${PREVIEW_PORT},fork,reuseaddr TCP:127.0.0.1:${targetPort} > /dev/null 2>&1 & echo $! > ${PREVIEW_PID_FILE}`;
+    await this.runCommand(sandbox, startCmd, { cwd: "/" });
+
+    this.logger.info(`[cloud][modal] preview proxy setup: ${PREVIEW_PORT} → ${targetPort}`);
+  }
+
+  async stopPreviewProxy(workspaceId: string): Promise<void> {
+    const sandbox = await this.getOrFetchSandbox(workspaceId);
+    if (!sandbox) return;
+
+    const stopCmd = `if [ -f ${PREVIEW_PID_FILE} ]; then pid=$(cat ${PREVIEW_PID_FILE}); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then kill "$pid" 2>/dev/null || true; fi; rm -f ${PREVIEW_PID_FILE}; fi`;
+    await this.runCommand(sandbox, stopCmd, { cwd: "/" });
+    this.logger.info(`[cloud][modal] preview proxy stopped`);
+  }
+
+  getPreviewPort(): number {
+    return PREVIEW_PORT;
+  }
+
   private async getOrFetchSandbox(id: string): Promise<Sandbox | null> {
     const cached = this.sandboxes.get(id);
     if (cached) return cached;
@@ -275,7 +306,7 @@ export class ModalCloudProvider implements CloudProvider {
     const extraPorts = Array.isArray(opts?.encryptedPorts)
       ? opts.encryptedPorts.filter((port) => Number.isFinite(port) && port > 0)
       : [];
-    const basePorts = [8080, 9223];
+    const basePorts = [CODE_SERVER_PORT, DEVTOOLS_PORT, PREVIEW_PORT];
     const encryptedPorts = Array.from(new Set<number>([...basePorts, ...extraPorts]));
     const params: SandboxCreateParams = {
       timeoutMs: this.timeoutMs > 0 ? this.timeoutMs : undefined,
