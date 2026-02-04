@@ -17,6 +17,7 @@ import { contentTypeForPath, readHeader, readRequestBody, sendJson, sendText } f
 import { createProxyToken, handleProxyRequest } from "../cloud/proxy.js";
 import { handleOAuthCallback } from "../cloud/oauth.js";
 import { handleGithubAppCallback } from "../cloud/githubApp.js";
+import { handleNotionCallback } from "../cloud/notion/oauth.js";
 import {
   githubWebhookAppIdMatches,
   githubWebhookMaxBodyBytes,
@@ -91,6 +92,7 @@ export type CreateHttpServerDeps = {
   resolveUserLanguage: (platform: "telegram" | "slack", userId: string) => Promise<UserLanguage>;
   resolveSessionLanguage: (session: { language?: string | null }) => UserLanguage;
   notifyGithubConnected: (metadataJson: string | null) => Promise<void>;
+  notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
   notifyWebSocketOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
 };
@@ -386,10 +388,16 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           return;
         }
         try {
-          const result = await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
+          const result =
+            provider === "notion"
+              ? await handleNotionCallback({ db, config, code, state, logger })
+              : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
           await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
           if (result.provider === "github") {
             await deps.notifyGithubConnected(result.metadataJson);
+          }
+          if (result.provider === "notion") {
+            await deps.notifyNotionConnected(result.metadataJson);
           }
           sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {
