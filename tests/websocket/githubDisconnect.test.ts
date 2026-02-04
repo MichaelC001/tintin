@@ -66,6 +66,11 @@ interface MockDbOptions {
     expires_at: number;
     consumed_at: number | null;
   } | null;
+  connectionsById?: Record<string, {
+    id: string;
+    identity_id: string;
+    type: string;
+  }>;
 }
 
 function createMockDb(options: MockDbOptions = {}) {
@@ -78,18 +83,35 @@ function createMockDb(options: MockDbOptions = {}) {
   const repos = options.repos ?? [];
   const runs = options.runs ?? [];
 
+  // Build connectionsById map for ID-based lookups (used in executeOAuthDisconnect)
+  const connectionsById = options.connectionsById ?? {};
+  if (connection && !connectionsById[connection.id]) {
+    connectionsById[connection.id] = connection;
+  }
+
   // Track delete operations
   const deletedTables: string[] = [];
   const insertedTables: string[] = [];
 
-  const createChainableMock = (tableName: string, result: unknown) => {
+  const createChainableMock = (tableName: string, result: unknown, whereClause?: { field: string; value: string }) => {
     // For connections table when explicitly set to null, always return null
-    const effectiveResult = (tableName === "connections" && !hasConnection) ? null : result;
+    let effectiveResult = (tableName === "connections" && !hasConnection) ? null : result;
+
+    // Handle where("id", "=", connectionId) pattern for connections table
+    if (tableName === "connections" && whereClause?.field === "id" && connectionsById[whereClause.value]) {
+      effectiveResult = connectionsById[whereClause.value];
+    }
 
     return {
-      selectAll: () => createChainableMock(tableName, effectiveResult),
-      select: () => createChainableMock(tableName, effectiveResult),
-      where: () => createChainableMock(tableName, effectiveResult),
+      selectAll: () => createChainableMock(tableName, effectiveResult, whereClause),
+      select: () => createChainableMock(tableName, effectiveResult, whereClause),
+      where: (field: string, op: string, value: string) => {
+        // Capture where clause for ID-based lookups
+        if (field === "id" && op === "=") {
+          return createChainableMock(tableName, effectiveResult, { field, value });
+        }
+        return createChainableMock(tableName, effectiveResult, whereClause);
+      },
       executeTakeFirst: async () => effectiveResult,
       execute: async () => (Array.isArray(effectiveResult) ? effectiveResult : effectiveResult ? [effectiveResult] : []),
     };
@@ -260,6 +282,41 @@ test("GitHubDisconnectService", async (t) => {
       assert.equal(msg.impact.repos, 2);
       assert.ok(msg.confirmToken, "confirmToken should be present");
       assert.equal(msg.expiresIn, 10 * 60 * 1000);
+    }
+  });
+
+  await t.test("should return preview for github_app connection", async () => {
+    const wsManager = createMockWsManager();
+    const config = createMockConfig(true);
+    const db = createMockDb({
+      connection: {
+        id: "conn-456",
+        identity_id: "identity-789",
+        type: "github_app",  // GitHub App type
+      },
+      repos: [{ id: "repo-3" }],
+    });
+    const logger = createMockLogger();
+
+    const service = new GitHubDisconnectService(wsManager, config, db, logger, null);
+
+    const message: GitHubDisconnectMessage = {
+      type: "github_disconnect",
+      action: "preview",
+    };
+
+    await service.handleGitHubDisconnect("conn-2", "identity-789", message);
+
+    const sentMessages = wsManager._getSentMessages();
+    assert.equal(sentMessages.length, 1);
+    const msg = sentMessages[0];
+    assert.ok(msg);
+    assert.equal(msg.message.type, "github_disconnect_preview");
+
+    if (msg.message.type === "github_disconnect_preview") {
+      assert.equal(msg.message.impact.repos, 1);
+      assert.ok(msg.message.confirmToken, "confirmToken should be present");
+      assert.equal(msg.message.expiresIn, 10 * 60 * 1000);
     }
   });
 

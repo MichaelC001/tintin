@@ -8,7 +8,7 @@ import type { GitHubDisconnectMessage } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { createPendingAction, consumePendingAction } from '../../cloud/store.js';
 import {
-  findGithubOAuthConnection,
+  findAnyGithubConnection,
   computeOAuthDisconnectImpact,
   executeOAuthDisconnect,
 } from '../../cloud/githubOauthDisconnect.js';
@@ -66,8 +66,8 @@ export class GitHubDisconnectService {
   }
 
   private async handlePreview(connId: string, identityId: string): Promise<void> {
-    // Find github_oauth connection for this identity
-    const connection = await findGithubOAuthConnection(this.db, identityId);
+    // Find any GitHub connection (github_app or github_oauth) for this identity
+    const connection = await findAnyGithubConnection(this.db, identityId);
     if (!connection) {
       this.wsManager.sendToConnection(connId, {
         type: 'github_disconnect_error',
