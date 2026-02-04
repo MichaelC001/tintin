@@ -19,6 +19,7 @@ export const StdioMcpProviderSchema = BaseMcpProviderSchema.extend({
 const HttpBaseSchema = BaseMcpProviderSchema.extend({
   url: z.string().url(),
   headers: z.record(z.string(), z.string()).default({}),
+  bearer_token_env_var: z.string().min(1).optional(),
 });
 
 export const HttpMcpProviderSchema = HttpBaseSchema.extend({
@@ -27,6 +28,12 @@ export const HttpMcpProviderSchema = HttpBaseSchema.extend({
 
 export const SseMcpProviderSchema = HttpBaseSchema.extend({
   type: z.literal("sse"),
+});
+
+export const GitHubMcpProviderSchema = BaseMcpProviderSchema.extend({
+  type: z.literal("github"),
+  github_host: z.string().url().optional(),
+  toolsets: z.array(z.string()).optional(),
 });
 
 const PlaywrightSnapshotModeSchema = z.enum(["incremental", "full", "none"]);
@@ -84,6 +91,7 @@ export const McpProviderConfigSchema = z.discriminatedUnion("type", [
   HttpMcpProviderSchema,
   SseMcpProviderSchema,
   PlaywrightMcpProviderSchema,
+  GitHubMcpProviderSchema,
 ]);
 
 export const McpConfigSchema = z.object({

@@ -80,3 +80,19 @@ test("buildMcpBootstrapConfig returns null when no local providers", () => {
   const bootstrap = buildMcpBootstrapConfig(config);
   assert.equal(bootstrap, null);
 });
+
+test("buildMcpBootstrapConfig ignores GitHub providers", () => {
+  const config: McpConfig = {
+    global_timeout_sec: 60,
+    log_level: "info",
+    providers: {
+      github: {
+        enabled: true,
+        type: "github",
+      },
+    },
+  };
+
+  const bootstrap = buildMcpBootstrapConfig(config);
+  assert.equal(bootstrap, null);
+});

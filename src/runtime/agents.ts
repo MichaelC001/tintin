@@ -147,14 +147,27 @@ const CodexAgent: AgentAdapter = {
     for (const [name, info] of entries) {
       const prefix = `mcp_servers.${name}`;
       if (info.transport === "stdio") {
+        args.push("--config", `${prefix}.type="stdio"`);
         if (info.command) args.push("--config", `${prefix}.command=${JSON.stringify(info.command)}`);
         if (info.args) args.push("--config", `${prefix}.args=${JSON.stringify(info.args)}`);
         if (info.env) args.push("--config", `${prefix}.env=${JSON.stringify(info.env)}`);
       } else if (info.url) {
+        if (info.transport === "http" || info.transport === "sse") {
+          args.push("--config", `${prefix}.type=${JSON.stringify(info.transport)}`);
+        }
         args.push("--config", `${prefix}.url=${JSON.stringify(info.url)}`);
       }
+      if (info.bearerTokenEnvVar) {
+        args.push("--config", `${prefix}.bearer_token_env_var=${JSON.stringify(info.bearerTokenEnvVar)}`);
+      }
       if (info.headers && Object.keys(info.headers).length > 0) {
-        args.push("--config", `${prefix}.headers=${JSON.stringify(info.headers)}`);
+        const headers =
+          info.bearerTokenEnvVar
+            ? Object.fromEntries(Object.entries(info.headers).filter(([k]) => k.toLowerCase() !== "authorization"))
+            : info.headers;
+        if (Object.keys(headers).length > 0) {
+          args.push("--config", `${prefix}.headers=${JSON.stringify(headers)}`);
+        }
       }
       args.push("--config", `${prefix}.enabled=true`);
       const timeout = info.startupTimeoutSec ?? opts.globalTimeout;
