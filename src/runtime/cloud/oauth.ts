@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import type { CloudOAuthProviderSection, CloudSection } from "../config.js";
 import type { Db } from "../db.js";
-import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection } from "./store.js";
+import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection, setGithubMcpToken } from "./store.js";
+import { encryptSecret } from "./secrets.js";
 
 function base64Url(input: Buffer): string {
   return input
@@ -136,5 +137,21 @@ export async function handleOAuthCallback(opts: {
     metadataJson: saved.metadata_json ?? null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
+
+  // For WebSocket GitHub OAuth connections, also store the token in github_mcp_tokens
+  // This enables GitHub MCP server integration for WebSocket users
+  if (opts.provider === "github" && saved.metadata_json && opts.cloud.secrets_key) {
+    try {
+      const metadata = JSON.parse(saved.metadata_json);
+      // connection_id indicates this OAuth was initiated from a WebSocket connection
+      if (metadata.connection_id) {
+        const encryptedToken = encryptSecret(token.accessToken, opts.cloud.secrets_key);
+        await setGithubMcpToken(opts.db, { identityId: saved.identity_id, encryptedToken });
+      }
+    } catch {
+      // Ignore metadata parsing errors - don't fail the OAuth flow
+    }
+  }
+
   return { identityId: saved.identity_id, provider: opts.provider, metadataJson: saved.metadata_json ?? null };
 }
