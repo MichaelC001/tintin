@@ -166,3 +166,89 @@ test("ModalCloudProvider pullDiff uses stdout on command error", async () => {
   const diff = await provider.pullDiff({ workspace, cwd: "/workspace/tintin/repo" });
   assert.equal(diff.diff, "diff-output");
 });
+
+test("ModalCloudProvider getPreviewPort returns 4100", () => {
+  const sandbox = createFakeSandbox();
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client: createFakeClient(sandbox) });
+  assert.equal(provider.getPreviewPort(), 4100);
+});
+
+test("ModalCloudProvider setupPreviewProxy stops existing and starts new socat", async () => {
+  const sandbox = createFakeSandbox();
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client: createFakeClient(sandbox) });
+  await provider.createWorkspace({});
+  sandbox.__state.calls.length = 0;
+
+  await provider.setupPreviewProxy("sb-test", 5173);
+
+  const commands = sandbox.__state.calls.map((c: any) => c.command[2]);
+  assert.equal(commands.length, 3);
+  // First command should be the stop command (checking PID file)
+  assert.ok(commands[0].includes("/tmp/preview-socat.pid"));
+  assert.ok(commands[0].includes("kill"));
+  // Second command should start socat with correct ports
+  assert.ok(commands[1].includes("socat"));
+  assert.ok(commands[1].includes("TCP-LISTEN:4100"));
+  assert.ok(commands[1].includes("TCP:127.0.0.1:5173"));
+  assert.ok(commands[1].includes("echo $! > /tmp/preview-socat.pid"));
+  assert.ok(commands[1].includes("setsid"));
+  // Third command should verify socat is running
+  assert.ok(commands[2].includes("kill -0"));
+});
+
+test("ModalCloudProvider setupPreviewProxy throws if sandbox missing", async () => {
+  const sandbox = createFakeSandbox();
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client: createFakeClient(sandbox) });
+  // Don't create workspace, so sandbox is not registered
+
+  await assert.rejects(
+    () => provider.setupPreviewProxy("non-existent", 5173),
+    /Missing sandbox/
+  );
+});
+
+test("ModalCloudProvider stopPreviewProxy kills by PID file", async () => {
+  const sandbox = createFakeSandbox();
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client: createFakeClient(sandbox) });
+  await provider.createWorkspace({});
+  sandbox.__state.calls.length = 0;
+
+  await provider.stopPreviewProxy("sb-test");
+
+  const commands = sandbox.__state.calls.map((c: any) => c.command[2]);
+  assert.equal(commands.length, 1);
+  assert.ok(commands[0].includes("/tmp/preview-socat.pid"));
+  assert.ok(commands[0].includes("kill"));
+});
+
+test("ModalCloudProvider stopPreviewProxy does not throw if sandbox missing", async () => {
+  const sandbox = createFakeSandbox();
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client: createFakeClient(sandbox) });
+  // Don't create workspace
+
+  await assert.doesNotReject(() => provider.stopPreviewProxy("non-existent"));
+});
+
+test("ModalCloudProvider createWorkspace includes preview port in encryptedPorts", async () => {
+  let capturedParams: any = null;
+  const sandbox = createFakeSandbox();
+  const client = {
+    apps: { fromName: async () => ({ appId: "app-test" }) },
+    images: { fromId: async () => ({ imageId: "im-base" }), fromRegistry: () => ({ imageId: "im-base" }) },
+    sandboxes: {
+      create: async (_app: any, _image: any, params: any) => {
+        capturedParams = params;
+        return sandbox;
+      },
+    },
+  } as any;
+  const provider = new ModalCloudProvider(makeConfig(), makeLogger(), { client });
+
+  await provider.createWorkspace({ prefix: "test" });
+
+  assert.ok(capturedParams);
+  assert.ok(Array.isArray(capturedParams.encryptedPorts));
+  assert.ok(capturedParams.encryptedPorts.includes(4100), "should include preview port 4100");
+  assert.ok(capturedParams.encryptedPorts.includes(8080), "should include code-server port 8080");
+  assert.ok(capturedParams.encryptedPorts.includes(9223), "should include devtools port 9223");
+});

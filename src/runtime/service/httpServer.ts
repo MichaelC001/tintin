@@ -176,7 +176,11 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           sendJson(res, 500, { error: "WebSocket token auth not configured" });
           return;
         }
-        const identityId = `ws:web:${crypto.randomUUID().slice(0, 8)}`;
+        // Accept client-provided identity ID for persistent anonymous sessions
+        // Format: ?identityId=<uuid>
+        const clientIdentityId = url.searchParams.get("identityId");
+        const isValidUUID = clientIdentityId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(clientIdentityId);
+        const identityId = isValidUUID ? `ws:web:${clientIdentityId}` : `ws:web:${crypto.randomUUID().slice(0, 8)}`;
         const ttlMs = proxy.token_ttl_ms ?? 3600000;
         const token = createProxyToken(proxy.shared_secret, identityId, ttlMs);
         sendJson(res, 200, { token, identityId, expiresIn: ttlMs });
