@@ -34,6 +34,12 @@ export interface StartOAuthMessage {
   provider: 'github' | 'gitlab';
 }
 
+export interface GitHubDisconnectMessage {
+  type: 'github_disconnect';
+  action: 'preview' | 'confirm';
+  token?: string;  // Required when action is 'confirm'
+}
+
 // ============ Cloud Run Messages (Client → Server) ============
 
 export interface CloudRunMessage {
@@ -70,6 +76,7 @@ export type ClientMessage =
   | ListReposMessage
   | GetAuthStatusMessage
   | StartOAuthMessage
+  | GitHubDisconnectMessage
   | CloudRunMessage
   | SubscribeRunMessage
   | CloudFollowUpMessage
@@ -204,6 +211,32 @@ export interface OAuthStartedMessage {
   authorizeUrl: string;
 }
 
+export interface GitHubDisconnectImpact {
+  repos: number;
+  runs: number;
+  sessions: number;
+  screenshots: number;
+  snapshots: number;
+}
+
+export interface GitHubDisconnectPreviewMessage {
+  type: 'github_disconnect_preview';
+  impact: GitHubDisconnectImpact;
+  confirmToken: string;
+  expiresIn: number;  // ms
+}
+
+export interface GitHubDisconnectResultMessage {
+  type: 'github_disconnect_result';
+  success: true;
+  impact: GitHubDisconnectImpact;
+}
+
+export interface GitHubDisconnectErrorMessage {
+  type: 'github_disconnect_error';
+  error: string;
+}
+
 // ============ Cloud Run Messages (Server → Client) ============
 
 export interface RunStatusMessage {
@@ -263,6 +296,9 @@ export type ServerMessage =
   | ReposListMessage
   | AuthStatusMessage
   | OAuthStartedMessage
+  | GitHubDisconnectPreviewMessage
+  | GitHubDisconnectResultMessage
+  | GitHubDisconnectErrorMessage
   | RunStatusMessage
   | RunLinksMessage
   | BrowserSessionMessage

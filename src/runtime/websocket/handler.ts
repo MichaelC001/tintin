@@ -8,7 +8,7 @@ import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth } from './guards.js';
-import { GitHubService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export interface PreviewUrlEvent {
   sessionId: string;
@@ -19,6 +19,7 @@ export interface PreviewUrlEvent {
 
 export class WebSocketHandler {
   private readonly githubService: GitHubService;
+  private readonly githubDisconnectService: GitHubDisconnectService;
   private readonly cloudRunService: CloudRunService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
@@ -40,6 +41,14 @@ export class WebSocketHandler {
       config,
       db,
       logger,
+    );
+
+    this.githubDisconnectService = new GitHubDisconnectService(
+      wsManager,
+      config,
+      db,
+      logger,
+      cloudManager,
     );
 
     // Initialize sandbox lifecycle service if cloud is enabled
@@ -113,6 +122,13 @@ export class WebSocketHandler {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
         await this.githubService.handleStartOAuth(connId, auth.identityId, message.provider);
+        break;
+      }
+
+      case 'github_disconnect': {
+        const auth = requireAuth(this.wsManager, connId);
+        if (!auth) return;
+        await this.githubDisconnectService.handleGitHubDisconnect(connId, auth.identityId, message);
         break;
       }
 
