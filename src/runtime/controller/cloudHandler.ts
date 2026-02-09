@@ -37,12 +37,18 @@ import {
   listSharedRepos,
   replaceGithubInstallationRepos,
   setIdentityActiveRepo,
+  setExaApiKey,
   setGithubMcpToken,
+  getGithubMcpToken,
+  getExaApiKey,
   getNotionMcpToken,
+  deleteNotionMcpToken,
   setSecret,
   shareRepo,
   unshareRepo,
   deleteSecret,
+  deleteExaApiKey,
+  deleteGithubMcpToken,
   putSetupSpec,
 } from "../cloud/store.js";
 import {
@@ -772,6 +778,15 @@ export class CloudHandler {
           return true;
         }
         await replyText("notion.oauth.connected");
+        return true;
+      }
+      case "mcp_notion_disconnect": {
+        if (!opts.isDirect) {
+          await replyText("connect.dm_only", { cmd: formatCmd("mcp notion disconnect") });
+          return true;
+        }
+        const ok = await deleteNotionMcpToken(this.deps.db, identity.id);
+        await replyText(ok ? "notion.oauth.disconnected" : "notion.oauth.not_connected");
         return true;
       }
       case "repos": {
@@ -1528,6 +1543,64 @@ export class CloudHandler {
         } catch (e) {
           await replyText("mcp.github_token.save_failed", { error: String(e) });
         }
+        return true;
+      }
+      case "mcp_github_token_status": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp github token status") });
+          return true;
+        }
+        const row = await getGithubMcpToken(this.deps.db, identity.id);
+        await replyText(row?.encrypted_token ? "mcp.github_token.status_set" : "mcp.github_token.status_missing");
+        return true;
+      }
+      case "mcp_github_token_delete": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp github token delete") });
+          return true;
+        }
+        const ok = await deleteGithubMcpToken(this.deps.db, identity.id);
+        await replyText(ok ? "mcp.github_token.deleted" : "mcp.github_token.delete_missing");
+        return true;
+      }
+      case "mcp_exa_key_set": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp exa key set") });
+          return true;
+        }
+        const cmd = opts.command as Extract<CloudCommand, { kind: "mcp_exa_key_set" }>;
+        if (!cmd.key) {
+          await replyText("mcp.exa_key.usage_set", { cmd: formatCmd("mcp exa key set <key>") });
+          return true;
+        }
+        if (!cloud.secrets_key) {
+          await replyText("cloud.secrets_missing");
+          return true;
+        }
+        try {
+          await setExaApiKey(this.deps.db, identity.id, cmd.key, cloud.secrets_key);
+          await replyText("mcp.exa_key.saved");
+        } catch (e) {
+          await replyText("mcp.exa_key.save_failed", { error: String(e) });
+        }
+        return true;
+      }
+      case "mcp_exa_key_status": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp exa key status") });
+          return true;
+        }
+        const key = await getExaApiKey(this.deps.db, identity.id);
+        await replyText(key ? "mcp.exa_key.status_set" : "mcp.exa_key.status_missing");
+        return true;
+      }
+      case "mcp_exa_key_delete": {
+        if (!opts.isDirect) {
+          await replyText("command.dm_only", { cmd: formatCmd("mcp exa key delete") });
+          return true;
+        }
+        const ok = await deleteExaApiKey(this.deps.db, identity.id);
+        await replyText(ok ? "mcp.exa_key.deleted" : "mcp.exa_key.delete_missing");
         return true;
       }
     }
