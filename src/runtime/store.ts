@@ -179,6 +179,27 @@ export async function countConcurrentSessionsForChat(db: Db, platform: string, c
   return Number((row as any)?.count ?? 0);
 }
 
+export async function countSessionsForUser(db: Db, platform: string, userId: string) {
+  const row = await db
+    .selectFrom("sessions")
+    .select(({ fn }) => fn.countAll().as("count"))
+    .where("platform", "=", platform)
+    .where("created_by_user_id", "=", userId)
+    .executeTakeFirst();
+  return Number((row as any)?.count ?? 0);
+}
+
+export async function countConcurrentSessionsForUser(db: Db, platform: string, userId: string) {
+  const row = await db
+    .selectFrom("sessions")
+    .select(({ fn }) => fn.countAll().as("count"))
+    .where("platform", "=", platform)
+    .where("created_by_user_id", "=", userId)
+    .where("status", "in", ["starting", "running"])
+    .executeTakeFirst();
+  return Number((row as any)?.count ?? 0);
+}
+
 export async function createSession(db: Db, row: SessionRow) {
   await db.insertInto("sessions").values(row).execute();
 }

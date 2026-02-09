@@ -147,7 +147,7 @@ export class WebSocketHandler {
         break;
       }
 
-      case 'subscribe_run': {
+      case 'subscribe_chat': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
         if (!this.cloudRunService) {
@@ -158,15 +158,15 @@ export class WebSocketHandler {
           });
           return;
         }
-        if (!message.runId) {
+        if (!message.chatId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            message: 'Chat ID required',
           });
           return;
         }
-        await this.cloudRunService.handleSubscribeRun(connId, message.runId);
+        await this.cloudRunService.handleSubscribeChat(connId, auth.conn, message.chatId);
         break;
       }
 
@@ -196,15 +196,15 @@ export class WebSocketHandler {
           });
           return;
         }
-        if (!message.runId) {
+        if (!message.chatId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            message: 'Chat ID required',
           });
           return;
         }
-        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
+        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.chatId);
         break;
       }
 

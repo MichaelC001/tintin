@@ -44,6 +44,7 @@ export interface GitHubDisconnectMessage {
 
 export interface CloudRunMessage {
   type: 'cloud_run';
+  chatId: string;                // stable conversation id from website
   repoIds?: string[];              // repo IDs (empty array = playground mode)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
@@ -53,20 +54,20 @@ export interface CloudRunMessage {
   lastRunId?: string;              // optional, restore from specific run's snapshot
 }
 
-export interface SubscribeRunMessage {
-  type: 'subscribe_run';
-  runId: string;
+export interface SubscribeChatMessage {
+  type: 'subscribe_chat';
+  chatId: string;
 }
 
 export interface CloudFollowUpMessage {
   type: 'cloud_follow_up';
-  runId: string;
+  chatId: string;
   prompt: string;
 }
 
 export interface CloudStopMessage {
   type: 'cloud_stop';
-  runId: string;
+  chatId: string;
 }
 
 export type ClientMessage =
@@ -78,7 +79,7 @@ export type ClientMessage =
   | StartOAuthMessage
   | GitHubDisconnectMessage
   | CloudRunMessage
-  | SubscribeRunMessage
+  | SubscribeChatMessage
   | CloudFollowUpMessage
   | CloudStopMessage;
 

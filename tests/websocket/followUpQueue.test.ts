@@ -110,10 +110,16 @@ function createMockConnection(connId = "conn-1"): WSConnection {
 function createMockConfig(): AppConfig {
   return {
     cloud: { default_agent: "codex", ui_base_url: "https://example.com" },
+    security: {
+      max_sessions_per_identity: 1000,
+      max_concurrent_sessions_per_identity: 100,
+    },
   } as unknown as AppConfig;
 }
 
 // ============ Tests ============
+
+const baseChatId = "chat-123";
 
 test("FollowUpQueue - FIFO order", async (t) => {
   await t.test("should process queued follow-ups in FIFO order", async () => {
@@ -173,10 +179,10 @@ test("FollowUpQueue - FIFO order", async (t) => {
 
     // Queue two follow-ups
     await service.handleCloudFollowUp("conn-1", conn1, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "First prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "First prompt",
     });
     await service.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Second prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Second prompt",
     });
 
     // Verify both are queued
@@ -212,13 +218,13 @@ test("FollowUpQueue - queue position", async (t) => {
     const conn = createMockConnection();
 
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt A",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt A",
     });
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt B",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt B",
     });
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt C",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt C",
     });
 
     const msgs = wsManager._getSentMessages();
@@ -248,10 +254,10 @@ test("FollowUpQueue - connection cleanup", async (t) => {
     const conn2 = createMockConnection("conn-2");
 
     await service.handleCloudFollowUp("conn-1", conn1, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-1",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-1",
     });
     await service.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-2",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-2",
     });
 
     // Disconnect conn-1
@@ -301,7 +307,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
 
     // Re-queue just conn-2's entry
     await service2.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-2 only",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-2 only",
     });
     // Override the DB to return finished
     wsManager._clearMessages();
@@ -359,7 +365,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
 
     const conn = createMockConnection("conn-1");
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Queued prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Queued prompt",
     });
 
     // conn-1 is NOT registered in wsManager.getConnection, so it appears disconnected
@@ -387,7 +393,7 @@ test("FollowUpQueue - queue size limit", async (t) => {
     // Queue 50 items (MAX_QUEUE_SIZE)
     for (let i = 0; i < 50; i++) {
       await service.handleCloudFollowUp("conn-1", conn, {
-        type: "cloud_follow_up", runId: "run-123", prompt: `Prompt ${i}`,
+        type: "cloud_follow_up", chatId: baseChatId, prompt: `Prompt ${i}`,
       });
     }
 
@@ -395,7 +401,7 @@ test("FollowUpQueue - queue size limit", async (t) => {
 
     // The 51st should fail
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Overflow prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Overflow prompt",
     });
 
     const msgs = wsManager._getSentMessages();

@@ -95,6 +95,7 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-1",
       repoIds: [], // Empty list for minimal setup
       prompt: "Hello",
     });
@@ -138,6 +139,7 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-2",
       repoIds: [],
       prompt: "Hello",
     });
@@ -173,6 +175,7 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-3",
       repoIds: [],
       prompt: "Hello",
     });

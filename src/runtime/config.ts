@@ -28,6 +28,8 @@ export interface SecuritySection {
   deny_globs: string[];
   max_sessions_per_chat: number;
   max_concurrent_sessions_per_chat: number;
+  max_sessions_per_identity: number;
+  max_concurrent_sessions_per_identity: number;
   telegram_allow_user_ids: string[];
   telegram_allow_chat_ids: string[];
   telegram_require_admin: boolean;
@@ -830,6 +832,14 @@ export async function loadConfig(configPath: string): Promise<AppConfig> {
       typeof security.max_concurrent_sessions_per_chat === "number"
         ? security.max_concurrent_sessions_per_chat
         : 2,
+    max_sessions_per_identity:
+      typeof (security as any).max_sessions_per_identity === "number"
+        ? (security as any).max_sessions_per_identity
+        : (typeof security.max_sessions_per_chat === "number" ? security.max_sessions_per_chat : 20),
+    max_concurrent_sessions_per_identity:
+      typeof (security as any).max_concurrent_sessions_per_identity === "number"
+        ? (security as any).max_concurrent_sessions_per_identity
+        : (typeof security.max_concurrent_sessions_per_chat === "number" ? security.max_concurrent_sessions_per_chat : 2),
     telegram_allow_user_ids: toStringIdArray((security as any).telegram_allow_user_ids),
     telegram_allow_chat_ids: toStringIdArray((security as any).telegram_allow_chat_ids),
     telegram_require_admin: typeof (security as any).telegram_require_admin === "boolean" ? (security as any).telegram_require_admin : false,
