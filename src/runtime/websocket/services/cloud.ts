@@ -77,7 +77,7 @@ export class CloudRunService {
         this.wsManager.sendToConnection(connId, {
           type: 'error',
           code: ErrorCodes.SERVICE_ERROR,
-          message: 'Sandbox is still provisioning. Please wait for sandbox_ready message.',
+          message: 'Sandbox is still provisioning. Please wait for sandbox_status ready.',
         });
         return;
       }
@@ -231,11 +231,12 @@ export class CloudRunService {
       // Subscribe connection to session
       this.wsManager.subscribeToSession(connId, sessionId);
 
-      // Send session started message
+      // Send session started via run_status
       this.wsManager.sendToConnection(connId, {
-        type: 'session_started',
-        sessionId,
+        type: 'run_status',
         runId,
+        sessionId,
+        status: 'started',
       });
 
       // Send browser session CDP URL if available
@@ -455,9 +456,10 @@ export class CloudRunService {
         this.wsManager.subscribeToSession(connId, sessionId);
 
         this.wsManager.sendToConnection(connId, {
-          type: 'follow_up_queued',
+          type: 'follow_up_status',
           runId: run.id,
           sessionId,
+          status: 'queued',
           position,
         });
 
@@ -575,7 +577,7 @@ export class CloudRunService {
     const resumed = await this.cloudManager.resumeCloudSession(session, prompt);
     if (resumed === 'resumed') {
       this.wsManager.sendToConnection(connId, {
-        type: 'follow_up_resuming',
+        type: 'follow_up_status',
         runId,
         sessionId,
         status: 'resuming',
@@ -595,7 +597,7 @@ export class CloudRunService {
     if (resumed === 'expired') {
       // Sandbox expired, need to restart
       this.wsManager.sendToConnection(connId, {
-        type: 'follow_up_resuming',
+        type: 'follow_up_status',
         runId,
         sessionId,
         status: 'restarting',

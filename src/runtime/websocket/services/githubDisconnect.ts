@@ -37,7 +37,8 @@ export class GitHubDisconnectService {
     const cloud = this.config.cloud;
     if (!cloud?.enabled) {
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: 'Cloud features not enabled',
       });
       return;
@@ -52,14 +53,16 @@ export class GitHubDisconnectService {
         await this.handleConfirm(connId, dbIdentityId, msg.token);
       } else {
         this.wsManager.sendToConnection(connId, {
-          type: 'github_disconnect_error',
+          type: 'github_disconnect_response',
+          action: 'error',
           error: 'Invalid action',
         });
       }
     } catch (err) {
       this.logger.error(`[ws] github_disconnect error id=${connId}: ${String(err)}`);
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: String(err),
       });
     }
@@ -70,7 +73,8 @@ export class GitHubDisconnectService {
     const connection = await findAnyGithubConnection(this.db, identityId);
     if (!connection) {
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: 'No GitHub connection found',
       });
       return;
@@ -95,7 +99,8 @@ export class GitHubDisconnectService {
     this.logger.info(`[ws] github_disconnect preview id=${connId} repos=${impact.repos} runs=${impact.runs}`);
 
     this.wsManager.sendToConnection(connId, {
-      type: 'github_disconnect_preview',
+      type: 'github_disconnect_response',
+      action: 'preview',
       impact,
       confirmToken: token,
       expiresIn: CONFIRM_TOKEN_TTL_MS,
@@ -105,7 +110,8 @@ export class GitHubDisconnectService {
   private async handleConfirm(connId: string, identityId: string, token?: string): Promise<void> {
     if (!token) {
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: 'Missing confirmation token',
       });
       return;
@@ -123,7 +129,8 @@ export class GitHubDisconnectService {
 
     if (!pending) {
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: 'Invalid or expired confirmation token',
       });
       return;
@@ -135,7 +142,8 @@ export class GitHubDisconnectService {
       payload = JSON.parse(pending.payload_json);
     } catch {
       this.wsManager.sendToConnection(connId, {
-        type: 'github_disconnect_error',
+        type: 'github_disconnect_response',
+        action: 'error',
         error: 'Invalid token payload',
       });
       return;
@@ -154,7 +162,8 @@ export class GitHubDisconnectService {
     this.logger.info(`[ws] github_disconnect completed id=${connId} repos=${impact.repos} runs=${impact.runs}`);
 
     this.wsManager.sendToConnection(connId, {
-      type: 'github_disconnect_result',
+      type: 'github_disconnect_response',
+      action: 'result',
       success: true,
       impact,
     });

@@ -11,9 +11,7 @@ export type {
   PingMessage,
   ClientMessage,
   // Server → Client messages
-  AuthOkMessage,
-  AuthErrorMessage,
-  SessionStartedMessage,
+  AuthResultMessage,
   ChunkMessage,
   ToolCallMessage,
   ToolOutputMessage,

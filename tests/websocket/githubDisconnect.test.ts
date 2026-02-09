@@ -218,8 +218,8 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg0 = sentMessages[0];
     assert.ok(msg0);
-    assert.equal(msg0.message.type, "github_disconnect_error");
-    if (msg0.message.type === "github_disconnect_error") {
+    assert.equal(msg0.message.type, "github_disconnect_response");
+    if (msg0.message.type === "github_disconnect_response") {
       assert.equal(msg0.message.error, "Cloud features not enabled");
     }
   });
@@ -243,8 +243,8 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg1 = sentMessages[0];
     assert.ok(msg1);
-    assert.equal(msg1.message.type, "github_disconnect_error");
-    if (msg1.message.type === "github_disconnect_error") {
+    assert.equal(msg1.message.type, "github_disconnect_response");
+    if (msg1.message.type === "github_disconnect_response") {
       assert.equal(msg1.message.error, "No GitHub connection found");
     }
   });
@@ -275,11 +275,11 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg2 = sentMessages[0];
     assert.ok(msg2);
-    assert.equal(msg2.message.type, "github_disconnect_preview");
+    assert.equal(msg2.message.type, "github_disconnect_response");
 
-    if (msg2.message.type === "github_disconnect_preview") {
+    if (msg2.message.type === "github_disconnect_response") {
       const msg = msg2.message;
-      assert.equal(msg.impact.repos, 2);
+      assert.equal(msg.impact!.repos, 2);
       assert.ok(msg.confirmToken, "confirmToken should be present");
       assert.equal(msg.expiresIn, 10 * 60 * 1000);
     }
@@ -311,10 +311,10 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg = sentMessages[0];
     assert.ok(msg);
-    assert.equal(msg.message.type, "github_disconnect_preview");
+    assert.equal(msg.message.type, "github_disconnect_response");
 
-    if (msg.message.type === "github_disconnect_preview") {
-      assert.equal(msg.message.impact.repos, 1);
+    if (msg.message.type === "github_disconnect_response") {
+      assert.equal(msg.message.impact!.repos, 1);
       assert.ok(msg.message.confirmToken, "confirmToken should be present");
       assert.equal(msg.message.expiresIn, 10 * 60 * 1000);
     }
@@ -340,8 +340,8 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg3 = sentMessages[0];
     assert.ok(msg3);
-    assert.equal(msg3.message.type, "github_disconnect_error");
-    if (msg3.message.type === "github_disconnect_error") {
+    assert.equal(msg3.message.type, "github_disconnect_response");
+    if (msg3.message.type === "github_disconnect_response") {
       assert.equal(msg3.message.error, "Missing confirmation token");
     }
   });
@@ -366,8 +366,8 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg4 = sentMessages[0];
     assert.ok(msg4);
-    assert.equal(msg4.message.type, "github_disconnect_error");
-    if (msg4.message.type === "github_disconnect_error") {
+    assert.equal(msg4.message.type, "github_disconnect_response");
+    if (msg4.message.type === "github_disconnect_response") {
       assert.equal(msg4.message.error, "Invalid or expired confirmation token");
     }
   });
@@ -391,8 +391,8 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(sentMessages.length, 1);
     const msg5 = sentMessages[0];
     assert.ok(msg5);
-    assert.equal(msg5.message.type, "github_disconnect_error");
-    if (msg5.message.type === "github_disconnect_error") {
+    assert.equal(msg5.message.type, "github_disconnect_response");
+    if (msg5.message.type === "github_disconnect_response") {
       assert.equal(msg5.message.error, "Invalid action");
     }
   });

@@ -187,12 +187,12 @@ test("FollowUpQueue - FIFO order", async (t) => {
 
     // Verify both are queued
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.filter((m) => m.message.type === "follow_up_queued");
+    const queued = msgs.filter((m) => m.message.type === "follow_up_status");
     assert.equal(queued.length, 2);
-    if (queued[0]?.message.type === "follow_up_queued") {
+    if (queued[0]?.message.type === "follow_up_status") {
       assert.equal(queued[0].message.position, 1);
     }
-    if (queued[1]?.message.type === "follow_up_queued") {
+    if (queued[1]?.message.type === "follow_up_status") {
       assert.equal(queued[1].message.position, 2);
     }
 
@@ -228,11 +228,11 @@ test("FollowUpQueue - queue position", async (t) => {
     });
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.filter((m) => m.message.type === "follow_up_queued");
+    const queued = msgs.filter((m) => m.message.type === "follow_up_status");
     assert.equal(queued.length, 3);
 
     const positions = queued.map((m) =>
-      m.message.type === "follow_up_queued" ? m.message.position : -1,
+      m.message.type === "follow_up_status" ? m.message.position : -1,
     );
     assert.deepEqual(positions, [1, 2, 3]);
   });

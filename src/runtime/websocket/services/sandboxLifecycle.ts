@@ -80,9 +80,10 @@ export class SandboxLifecycleService {
       sandbox.rootPath = workspace.rootPath;
       sandbox.status = 'ready';
 
-      // Send ready message
+      // Send ready status
       this.wsManager.sendToConnection(connId, {
-        type: 'sandbox_ready',
+        type: 'sandbox_status',
+        status: 'ready',
         workspaceId: workspace.id,
       });
 
@@ -96,9 +97,10 @@ export class SandboxLifecycleService {
         conn.sandbox.error = String(err);
       }
 
-      // Send error message
+      // Send error status
       this.wsManager.sendToConnection(connId, {
-        type: 'sandbox_error',
+        type: 'sandbox_status',
+        status: 'error',
         message: `Failed to create sandbox: ${String(err)}`,
         recoverable: false,
       });

@@ -211,7 +211,7 @@ test("CloudRunService handleCloudRun", async (t) => {
     assert.equal(browserSessionMsg, undefined, "browser_session message should not be sent");
   });
 
-  await t.test("should send session_started message before browser_session", async () => {
+  await t.test("should send run_status(started) message before browser_session", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
       result: {
@@ -236,14 +236,14 @@ test("CloudRunService handleCloudRun", async (t) => {
     await service.handleCloudRun("conn-1", createMockConnection(), message);
 
     const sentMessages = wsManager._getSentMessages();
-    const sessionStartedIndex = sentMessages.findIndex((m) => m.message.type === "session_started");
+    const sessionStartedIndex = sentMessages.findIndex((m) => m.message.type === "run_status");
     const browserSessionIndex = sentMessages.findIndex((m) => m.message.type === "browser_session");
 
-    assert.ok(sessionStartedIndex >= 0, "session_started message should be sent");
+    assert.ok(sessionStartedIndex >= 0, "run_status(started) message should be sent");
     assert.ok(browserSessionIndex >= 0, "browser_session message should be sent");
     assert.ok(
       sessionStartedIndex < browserSessionIndex,
-      "session_started should come before browser_session",
+      "run_status(started) should come before browser_session",
     );
   });
 
@@ -530,8 +530,8 @@ test("CloudRunService auto-restore", async (t) => {
 
     // Should still start session successfully
     const sentMessages = wsManager._getSentMessages();
-    const sessionStartedMsg = sentMessages.find((m) => m.message.type === "session_started");
-    assert.ok(sessionStartedMsg, "session_started message should be sent");
+    const sessionStartedMsg = sentMessages.find((m) => m.message.type === "run_status");
+    assert.ok(sessionStartedMsg, "run_status(started) message should be sent");
   });
 
   await t.test("should not call detectLatestSnapshot when autoRestore is undefined", async () => {

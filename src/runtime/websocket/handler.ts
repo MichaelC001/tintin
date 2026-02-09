@@ -237,7 +237,8 @@ export class WebSocketHandler {
       }
 
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_ok',
+        type: 'auth_result',
+        success: true,
         identityId,
       });
       this.logger.debug(`[ws] auth ok (no-auth mode) id=${connId} identity=${identityId}`);
@@ -252,7 +253,8 @@ export class WebSocketHandler {
     // Phase 2: Token verification (when auth_enabled = true)
     if (!token) {
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Token required',
       });
       this.wsManager.closeConnection(connId, 4001, 'Token required');
@@ -264,7 +266,8 @@ export class WebSocketHandler {
     if (!secret) {
       this.logger.warn(`[ws] auth failed id=${connId}: shared_secret not configured`);
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Auth not configured',
       });
       this.wsManager.closeConnection(connId, 4001, 'Auth not configured');
@@ -275,7 +278,8 @@ export class WebSocketHandler {
     if (!verified) {
       this.logger.warn(`[ws] auth failed id=${connId}: invalid token`);
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Invalid token',
       });
       this.wsManager.closeConnection(connId, 4001, 'Invalid token');
@@ -293,7 +297,8 @@ export class WebSocketHandler {
     }
 
     this.wsManager.sendToConnection(connId, {
-      type: 'auth_ok',
+      type: 'auth_result',
+      success: true,
       identityId: verified.identityId,
     });
     this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);

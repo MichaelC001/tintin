@@ -85,20 +85,11 @@ export type ClientMessage =
 
 // ============ Server → Client Messages ============
 
-export interface AuthOkMessage {
-  type: 'auth_ok';
-  identityId?: string;
-}
-
-export interface AuthErrorMessage {
-  type: 'auth_error';
-  message: string;
-}
-
-export interface SessionStartedMessage {
-  type: 'session_started';
-  sessionId: string;
-  runId?: string;
+export interface AuthResultMessage {
+  type: 'auth_result';
+  success: boolean;
+  identityId?: string;  // when success=true
+  message?: string;     // when success=false
 }
 
 export interface ChunkMessage {
@@ -220,22 +211,17 @@ export interface GitHubDisconnectImpact {
   snapshots: number;
 }
 
-export interface GitHubDisconnectPreviewMessage {
-  type: 'github_disconnect_preview';
-  impact: GitHubDisconnectImpact;
-  confirmToken: string;
-  expiresIn: number;  // ms
-}
-
-export interface GitHubDisconnectResultMessage {
-  type: 'github_disconnect_result';
-  success: true;
-  impact: GitHubDisconnectImpact;
-}
-
-export interface GitHubDisconnectErrorMessage {
-  type: 'github_disconnect_error';
-  error: string;
+export interface GitHubDisconnectResponseMessage {
+  type: 'github_disconnect_response';
+  action: 'preview' | 'result' | 'error';
+  // action='preview'
+  impact?: GitHubDisconnectImpact;
+  confirmToken?: string;
+  expiresIn?: number;  // ms
+  // action='result'
+  success?: true;
+  // action='error'
+  error?: string;
 }
 
 // ============ Cloud Run Messages (Server → Client) ============
@@ -243,7 +229,8 @@ export interface GitHubDisconnectErrorMessage {
 export interface RunStatusMessage {
   type: 'run_status';
   runId: string;
-  status: CloudRunStatus;
+  sessionId?: string;  // present when status='started'
+  status: CloudRunStatus | 'started';
   message?: string;
 }
 
@@ -267,24 +254,16 @@ export interface BrowserSessionMessage {
   provider: BrowserProvider;
 }
 
-export interface FollowUpQueuedMessage {
-  type: 'follow_up_queued';
+export interface FollowUpStatusMessage {
+  type: 'follow_up_status';
   runId: string;
   sessionId: string;
-  position: number;
-}
-
-export interface FollowUpResumingMessage {
-  type: 'follow_up_resuming';
-  runId: string;
-  sessionId: string;
-  status: 'resuming' | 'restarting';
+  status: 'queued' | 'resuming' | 'restarting';
+  position?: number;  // only when status='queued'
 }
 
 export type ServerMessage =
-  | AuthOkMessage
-  | AuthErrorMessage
-  | SessionStartedMessage
+  | AuthResultMessage
   | ChunkMessage
   | ToolCallMessage
   | ToolOutputMessage
@@ -297,17 +276,12 @@ export type ServerMessage =
   | ReposListMessage
   | AuthStatusMessage
   | OAuthStartedMessage
-  | GitHubDisconnectPreviewMessage
-  | GitHubDisconnectResultMessage
-  | GitHubDisconnectErrorMessage
+  | GitHubDisconnectResponseMessage
   | RunStatusMessage
   | RunLinksMessage
   | BrowserSessionMessage
   | SandboxStatusMessage
-  | SandboxReadyMessage
-  | SandboxErrorMessage
-  | FollowUpQueuedMessage
-  | FollowUpResumingMessage;
+  | FollowUpStatusMessage;
 
 // ============ Error Codes ============
 
@@ -363,17 +337,7 @@ export interface SandboxStatusMessage {
   status: ConnectionSandboxStatus;
   workspaceId?: string;
   message?: string;
-}
-
-export interface SandboxReadyMessage {
-  type: 'sandbox_ready';
-  workspaceId: string;
-}
-
-export interface SandboxErrorMessage {
-  type: 'sandbox_error';
-  message: string;
-  recoverable: boolean;
+  recoverable?: boolean;  // only when status='error'
 }
 
 // ============ Connection State ============

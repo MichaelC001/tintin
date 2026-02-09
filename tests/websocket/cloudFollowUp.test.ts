@@ -337,9 +337,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
     );
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.find((m) => m.message.type === "follow_up_queued");
-    assert.ok(queued, "should send follow_up_queued");
-    if (queued?.message.type === "follow_up_queued") {
+    const queued = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(queued, "should send follow_up_status");
+    if (queued?.message.type === "follow_up_status") {
       assert.equal(queued.message.runId, "run-123");
       assert.equal(queued.message.sessionId, "session-456");
       assert.equal(queued.message.position, 1);
@@ -362,8 +362,8 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
     );
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.find((m) => m.message.type === "follow_up_queued");
-    assert.ok(queued, "should send follow_up_queued");
+    const queued = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(queued, "should send follow_up_status");
   });
 
   await t.test("should call resumeCloudSession when session is finished", async () => {
@@ -390,9 +390,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
 
     assert.ok(resumeCalled, "resumeCloudSession should be called");
     const msgs = wsManager._getSentMessages();
-    const resuming = msgs.find((m) => m.message.type === "follow_up_resuming");
-    assert.ok(resuming, "should send follow_up_resuming");
-    if (resuming?.message.type === "follow_up_resuming") {
+    const resuming = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(resuming, "should send follow_up_status");
+    if (resuming?.message.type === "follow_up_status") {
       assert.equal(resuming.message.status, "resuming");
     }
   });
@@ -447,9 +447,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
 
     assert.ok(restartCalled, "restartCloudSession should be called");
     const msgs = wsManager._getSentMessages();
-    const resuming = msgs.find((m) => m.message.type === "follow_up_resuming");
-    assert.ok(resuming, "should send follow_up_resuming");
-    if (resuming?.message.type === "follow_up_resuming") {
+    const resuming = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(resuming, "should send follow_up_status");
+    if (resuming?.message.type === "follow_up_status") {
       assert.equal(resuming.message.status, "restarting");
     }
   });
