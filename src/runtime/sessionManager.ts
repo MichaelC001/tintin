@@ -15,8 +15,10 @@ import { nowMs, sleep } from "./util.js";
 import type { McpRegistry } from "./mcp/registry.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "./mcp/utils.js";
 import { buildExaMcpUrl } from "./mcp/providers/exa.js";
+import { buildParallelAuthHeaders, getParallelSearchMcpUrl, getParallelTaskMcpUrl } from "./mcp/providers/parallel.js";
+import { resolveMcpProviderActivation } from "./mcp/activation.js";
 import { ensureNotionToken } from "./cloud/notion/token.js";
-import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity } from "./cloud/store.js";
+import { getExaApiKey, getGithubMcpToken, getOrCreateIdentity, getParallelApiKey } from "./cloud/store.js";
 import { decryptSecret } from "./cloud/secrets.js";
 import { buildLocalizedPrompt } from "./prompt.js";
 import {
@@ -363,7 +365,7 @@ export class SessionManager {
         workspaceId: opts.workspaceId,
         userId: opts.userId,
       });
-      const mcpConfig = await this.mcpCliArgs(opts.agent, identity.id);
+      const mcpConfig = await this.mcpCliArgs(opts.agent, identity.id, opts.initialPrompt);
       const cloudProxyArgs = this.buildCloudProxyCliArgs(opts.agent, envOverrides);
       const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
       const spawnedProc = adapter.spawnExec({
@@ -494,7 +496,7 @@ export class SessionManager {
       workspaceId: session.workspace_id,
       userId: session.created_by_user_id,
     });
-    const mcpConfig = await this.mcpCliArgs(session.agent, identity.id);
+    const mcpConfig = await this.mcpCliArgs(session.agent, identity.id, prompt);
     const cloudProxyArgs = this.buildCloudProxyCliArgs(session.agent, envWithCloudProxy);
     const extraArgs = [...(mcpConfig?.args ?? []), ...cloudProxyArgs];
     try {
@@ -732,13 +734,16 @@ export class SessionManager {
   private async mcpCliArgs(
     agent: SessionAgent,
     identityId: string,
+    prompt: string,
   ): Promise<{ args: string[]; env: Record<string, string> } | null> {
     if (!this.mcpRegistry) return null;
-    const servers = await this.mcpRegistry.startAll();
     const mcp = this.config.mcp;
+    const activation = resolveMcpProviderActivation(mcp, prompt);
+    const servers = await this.mcpRegistry.startAll();
     if (mcp) {
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "github") continue;
         const token = await this.requireGithubMcpToken(identityId);
         const headers: Record<string, string> = {
@@ -763,6 +768,7 @@ export class SessionManager {
       }
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "notion") continue;
         const token = await this.requireNotionMcpToken(identityId);
         const existing = servers.get(name);
@@ -791,6 +797,7 @@ export class SessionManager {
       }
       for (const [name, provider] of Object.entries(mcp.providers)) {
         if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
         if (provider.type !== "exa") continue;
         const apiKey = await this.resolveExaApiKey(identityId, provider.api_key);
         servers.set(name, {
@@ -801,6 +808,39 @@ export class SessionManager {
           status: "running",
           startupTimeoutSec: provider.startup_timeout_sec,
         });
+      }
+      for (const [name, provider] of Object.entries(mcp.providers)) {
+        if (!provider.enabled) continue;
+        if (!activation.activeProviderNames.has(name)) continue;
+        if (provider.type !== "parallel") continue;
+        const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
+        const headers = buildParallelAuthHeaders(apiKey);
+        if (provider.search_enabled !== false) {
+          const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
+          servers.set("parallel_search", {
+            id: "parallel_search",
+            transport: "http",
+            url: getParallelSearchMcpUrl(),
+            headers,
+            bearerTokenEnvVar,
+            bearerToken: apiKey,
+            status: "running",
+            startupTimeoutSec: provider.startup_timeout_sec,
+          });
+        }
+        if (provider.task_enabled !== false) {
+          const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
+          servers.set("parallel_task", {
+            id: "parallel_task",
+            transport: "http",
+            url: getParallelTaskMcpUrl(),
+            headers,
+            bearerTokenEnvVar,
+            bearerToken: apiKey,
+            status: "running",
+            startupTimeoutSec: provider.startup_timeout_sec,
+          });
+        }
       }
     }
     if (servers.size === 0) return null;
@@ -844,6 +884,25 @@ export class SessionManager {
       const envValue = process.env[envVar];
       if (envValue) return envValue;
       throw new Error(`Exa API key env var ${envVar} is not set. Set it or configure [mcp.providers.exa].api_key.`);
+    }
+    return configKey;
+  }
+
+  private async resolveParallelApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getParallelApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(
+        `Parallel API key env var ${envVar} is not set. Set it or configure [mcp.providers.parallel].api_key.`,
+      );
     }
     return configKey;
   }
