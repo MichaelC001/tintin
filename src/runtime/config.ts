@@ -120,6 +120,8 @@ export interface CloudGithubAppSection {
   app_base_url: string;
   webhook_path: string;
   webhook_secret: string;
+  client_id: string;
+  client_secret: string;
 }
 
 export interface CloudUiSection {
@@ -532,6 +534,8 @@ function normalizeCloudGithubAppSection(value: unknown): CloudGithubAppSection {
   const webhookSecretRaw = typeof (raw as any).webhook_secret === "string" ? (raw as any).webhook_secret : "";
   const webhook_secret = webhookSecretRaw.trim();
   assert(webhook_secret.length > 0, "[cloud].github_app.webhook_secret is required");
+  const client_id = typeof (raw as any).client_id === "string" ? (raw as any).client_id : "";
+  const client_secret = typeof (raw as any).client_secret === "string" ? (raw as any).client_secret : "";
   return {
     app_id,
     app_slug,
@@ -540,6 +544,8 @@ function normalizeCloudGithubAppSection(value: unknown): CloudGithubAppSection {
     app_base_url,
     webhook_path,
     webhook_secret,
+    client_id,
+    client_secret,
   };
 }
 

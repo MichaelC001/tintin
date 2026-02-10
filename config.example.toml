@@ -158,6 +158,10 @@ webhook_path = "/github/webhook"
 webhook_secret = "env:GITHUB_APP_WEBHOOK_SECRET"
 # api_base_url = "https://api.github.com"
 # app_base_url = "https://github.com"
+# OAuth credentials for MCP token auto-setup (optional)
+# Get these from GitHub App settings > General > Client credentials
+# client_id = "Iv1.xxxxxxxxxx"
+# client_secret = "env:GITHUB_APP_CLIENT_SECRET"
 
 [cloud.oauth.gitlab]
 client_id = "env:GITLAB_OAUTH_CLIENT_ID"
