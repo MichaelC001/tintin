@@ -373,9 +373,14 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           }
           try {
             const result = await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
-            await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
-            await deps.notifyGithubConnected(result.metadataJson);
-            sendText(res, 200, "Connected. Return to the chat.");
+            if (result.oauthRedirectUrl) {
+              res.writeHead(302, { Location: result.oauthRedirectUrl });
+              res.end();
+            } else {
+              await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
+              await deps.notifyGithubConnected(result.metadataJson);
+              sendText(res, 200, "Connected. Return to the chat.");
+            }
           } catch (e) {
             sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
           }
