@@ -53,11 +53,11 @@ function createMockConfig(cloudEnabled = true): AppConfig {
 }
 
 interface MockDbOptions {
-  connection?: {
+  connections?: Array<{
     id: string;
     identity_id: string;
     type: string;
-  } | null;
+  }> | null;
   repos?: Array<{ id: string }>;
   runs?: Array<{ id: string; session_id: string | null; status: string }>;
   pendingAction?: {
@@ -74,19 +74,20 @@ interface MockDbOptions {
 }
 
 function createMockDb(options: MockDbOptions = {}) {
-  const hasConnection = options.connection !== null;
-  const connection = options.connection === null ? null : (options.connection ?? {
+  const connections = options.connections === null ? [] : (options.connections ?? [{
     id: "conn-123",
     identity_id: "identity-456",
     type: "github_oauth",
-  });
+  }]);
   const repos = options.repos ?? [];
   const runs = options.runs ?? [];
 
-  // Build connectionsById map for ID-based lookups (used in executeOAuthDisconnect)
+  // Build connectionsById map for ID-based lookups
   const connectionsById = options.connectionsById ?? {};
-  if (connection && !connectionsById[connection.id]) {
-    connectionsById[connection.id] = connection;
+  for (const conn of connections) {
+    if (!connectionsById[conn.id]) {
+      connectionsById[conn.id] = conn;
+    }
   }
 
   // Track delete operations
@@ -94,8 +95,7 @@ function createMockDb(options: MockDbOptions = {}) {
   const insertedTables: string[] = [];
 
   const createChainableMock = (tableName: string, result: unknown, whereClause?: { field: string; value: string }) => {
-    // For connections table when explicitly set to null, always return null
-    let effectiveResult = (tableName === "connections" && !hasConnection) ? null : result;
+    let effectiveResult = result;
 
     // Handle where("id", "=", connectionId) pattern for connections table
     if (tableName === "connections" && whereClause?.field === "id" && connectionsById[whereClause.value]) {
@@ -146,7 +146,7 @@ function createMockDb(options: MockDbOptions = {}) {
   return {
     selectFrom: (tableName: string) => {
       if (tableName === "connections") {
-        return createChainableMock(tableName, connection);
+        return createChainableMock(tableName, connections);
       }
       if (tableName === "repos") {
         return createChainableMock(tableName, repos);
@@ -167,7 +167,7 @@ function createMockDb(options: MockDbOptions = {}) {
         return createChainableMock(tableName, []);
       }
       if (tableName === "identities") {
-        return createChainableMock(tableName, { id: connection?.identity_id ?? "identity-456" });
+        return createChainableMock(tableName, { id: connections[0]?.identity_id ?? "identity-456" });
       }
       if (tableName === "pending_actions") {
         return createChainableMock(tableName, options.pendingAction);
@@ -227,7 +227,7 @@ test("GitHubDisconnectService", async (t) => {
   await t.test("should return error when no GitHub connection found", async () => {
     const wsManager = createMockWsManager();
     const config = createMockConfig(true);
-    const db = createMockDb({ connection: null });
+    const db = createMockDb({ connections: null });
     const logger = createMockLogger();
 
     const service = new GitHubDisconnectService(wsManager, config, db, logger, null);
@@ -253,11 +253,9 @@ test("GitHubDisconnectService", async (t) => {
     const wsManager = createMockWsManager();
     const config = createMockConfig(true);
     const db = createMockDb({
-      connection: {
-        id: "conn-123",
-        identity_id: "identity-456",
-        type: "github_oauth",
-      },
+      connections: [
+        { id: "conn-123", identity_id: "identity-456", type: "github_oauth" },
+      ],
       repos: [{ id: "repo-1" }, { id: "repo-2" }],
     });
     const logger = createMockLogger();
@@ -289,11 +287,9 @@ test("GitHubDisconnectService", async (t) => {
     const wsManager = createMockWsManager();
     const config = createMockConfig(true);
     const db = createMockDb({
-      connection: {
-        id: "conn-456",
-        identity_id: "identity-789",
-        type: "github_app",  // GitHub App type
-      },
+      connections: [
+        { id: "conn-456", identity_id: "identity-789", type: "github_app" },
+      ],
       repos: [{ id: "repo-3" }],
     });
     const logger = createMockLogger();
@@ -369,6 +365,35 @@ test("GitHubDisconnectService", async (t) => {
     assert.equal(msg4.message.type, "github_disconnect_response");
     if (msg4.message.type === "github_disconnect_response") {
       assert.equal(msg4.message.error, "Invalid or expired confirmation token");
+    }
+  });
+
+  await t.test("should return preview covering both github_app and github_oauth connections", async () => {
+    const wsManager = createMockWsManager();
+    const config = createMockConfig(true);
+    const db = createMockDb({
+      connections: [
+        { id: "conn-app", identity_id: "identity-456", type: "github_app" },
+        { id: "conn-oauth", identity_id: "identity-456", type: "github_oauth" },
+      ],
+      repos: [{ id: "repo-1" }, { id: "repo-2" }],
+    });
+    const logger = createMockLogger();
+
+    const service = new GitHubDisconnectService(wsManager, config, db, logger, null);
+
+    await service.handleGitHubDisconnect("conn-1", "identity-456", {
+      type: "github_disconnect",
+      action: "preview",
+    });
+
+    const sentMessages = wsManager._getSentMessages();
+    assert.equal(sentMessages.length, 1);
+    const msg = sentMessages[0]!;
+    assert.equal(msg.message.type, "github_disconnect_response");
+    if (msg.message.type === "github_disconnect_response") {
+      assert.ok(msg.message.confirmToken, "should have confirm token");
+      assert.equal(msg.message.impact!.repos, 2);
     }
   });
 
