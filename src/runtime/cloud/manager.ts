@@ -16,6 +16,7 @@ import type { McpServerInfo } from "../mcp/types.js";
 import { buildMcpBootstrapConfig, encodeMcpBootstrapConfig, type McpBootstrapConfig } from "../mcp/bootstrap.js";
 import { collectMcpAgentEnv, formatMcpBearerEnvVar } from "../mcp/utils.js";
 import { buildExaMcpUrl } from "../mcp/providers/exa.js";
+import { buildParallelAuthHeaders, getParallelSearchMcpUrl, getParallelTaskMcpUrl } from "../mcp/providers/parallel.js";
 import {
   resolvePlaywrightProvider,
   resolvePlaywrightProviderEntry,
@@ -23,7 +24,9 @@ import {
   type McpProviderConfig,
   type NotionMcpProviderConfig,
   type ExaMcpProviderConfig,
+  type ParallelMcpProviderConfig,
 } from "../mcp/config.js";
+import { resolveMcpProviderActivation } from "../mcp/activation.js";
 import { resolveCodexHomeFromSessionsRoot, resolveSessionsRoot } from "../codex.js";
 import { resolveClaudeConfigDirFromSessionsRoot, resolveClaudeSessionJsonlPath } from "../claudeCode.js";
 import { LocalCloudProvider } from "./localProvider.js";
@@ -59,6 +62,7 @@ import {
   getCloudSnapshot,
   getGithubMcpToken,
   getExaApiKey,
+  getParallelApiKey,
   getLatestSetupSpec,
   getLatestRunForIdentity,
   listSecrets,
@@ -1648,6 +1652,8 @@ export class CloudManager {
         return this.buildNotionServerInfo(name, provider);
       case "exa":
         throw new Error(`[mcp.providers.${name}] Exa MCP requires API key resolution.`);
+      case "parallel":
+        throw new Error(`[mcp.providers.${name}] Parallel MCP requires API key resolution.`);
       default: {
         const unreachable: never = provider;
         throw new Error(`Unsupported MCP provider type: ${(unreachable as { type?: string }).type ?? "unknown"}`);
@@ -1705,17 +1711,67 @@ export class CloudManager {
     };
   }
 
+  private buildParallelSearchServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_search");
+    return {
+      id: "parallel_search",
+      transport: "http",
+      url: getParallelSearchMcpUrl(),
+      headers: buildParallelAuthHeaders(apiKey),
+      bearerTokenEnvVar,
+      bearerToken: apiKey,
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
+  private buildParallelTaskServerInfo(provider: ParallelMcpProviderConfig, apiKey: string): McpServerInfo {
+    const bearerTokenEnvVar = formatMcpBearerEnvVar("parallel_task");
+    return {
+      id: "parallel_task",
+      transport: "http",
+      url: getParallelTaskMcpUrl(),
+      headers: buildParallelAuthHeaders(apiKey),
+      bearerTokenEnvVar,
+      bearerToken: apiKey,
+      status: "running",
+      startupTimeoutSec: provider.startup_timeout_sec,
+    };
+  }
+
   private async buildRemoteMcpArgs(
     agent: SessionAgent,
     identityId: string,
+    prompt: string,
     serverOverride?: McpServerInfo,
   ): Promise<{ args: string[]; env: Record<string, string> }> {
     if (this.provider.id === "local") return { args: [], env: {} };
     const mcp = this.config.mcp;
     if (!mcp) return { args: [], env: {} };
+    const activation = resolveMcpProviderActivation(mcp, prompt);
+    const providerSummary = Object.entries(mcp.providers)
+      .map(([name, provider]) => {
+        const base = `${name}{type=${provider.type},enabled=${provider.enabled ? 1 : 0}`;
+        if (provider.type === "parallel") {
+          const searchEnabled = provider.search_enabled !== false ? 1 : 0;
+          const taskEnabled = provider.task_enabled !== false ? 1 : 0;
+          return `${base},search=${searchEnabled},task=${taskEnabled}}`;
+        }
+        return `${base}}`;
+      })
+      .join(" ");
+    const activeProviders = Array.from(activation.activeProviderNames).sort((a, b) => a.localeCompare(b));
+    const deferredProviders = Array.from(activation.deferredProviderNames).sort((a, b) => a.localeCompare(b));
+    this.logger.debug(
+      `[cloud][mcp] provider snapshot identity=${identityId} configured=${providerSummary || "(none)"}`,
+    );
+    this.logger.debug(
+      `[cloud][mcp] activation identity=${identityId} active=${activeProviders.join(",") || "(none)"} deferred=${deferredProviders.join(",") || "(none)"}`,
+    );
     const servers = new Map<string, McpServerInfo>();
     for (const [name, provider] of Object.entries(mcp.providers)) {
       if (!provider.enabled) continue;
+      if (!activation.activeProviderNames.has(name)) continue;
       if (provider.type === "playwright") continue;
       if (provider.type === "github") {
         const token = await this.requireGithubMcpToken(identityId);
@@ -1728,13 +1784,28 @@ export class CloudManager {
         this.logger.debug(`[cloud][mcp] exa configured identity=${identityId}`);
         continue;
       }
+      if (provider.type === "parallel") {
+        const apiKey = await this.resolveParallelApiKey(identityId, provider.api_key);
+        if (provider.search_enabled !== false) {
+          servers.set("parallel_search", this.buildParallelSearchServerInfo(provider, apiKey));
+        }
+        if (provider.task_enabled !== false) {
+          servers.set("parallel_task", this.buildParallelTaskServerInfo(provider, apiKey));
+        }
+        this.logger.debug(
+          `[cloud][mcp] parallel configured identity=${identityId} search=${provider.search_enabled} task=${provider.task_enabled}`,
+        );
+        continue;
+      }
       const serverInfo = this.buildServerInfoFromConfig(name, provider);
       if (provider.type === "notion") {
         const token = await this.requireNotionMcpToken(identityId);
         serverInfo.bearerTokenEnvVar =
           serverInfo.bearerTokenEnvVar ?? provider.bearer_token_env_var ?? formatMcpBearerEnvVar(name);
         serverInfo.bearerToken = token;
-        this.logger.debug(`[cloud][mcp] notion token set identity=${identityId} env_var=${serverInfo.bearerTokenEnvVar} token_len=${token.length}`);
+        this.logger.debug(
+          `[cloud][mcp] notion token set identity=${identityId} env_var=${serverInfo.bearerTokenEnvVar} token_len=${token.length}`,
+        );
       }
       servers.set(name, serverInfo);
     }
@@ -1802,6 +1873,25 @@ export class CloudManager {
     return configKey;
   }
 
+  private async resolveParallelApiKey(identityId: string, configKey: string): Promise<string> {
+    const secretKey = this.config.cloud?.secrets_key ?? "";
+    if (secretKey) {
+      const encrypted = await getParallelApiKey(this.db, identityId);
+      if (encrypted) {
+        return decryptSecret(encrypted, secretKey);
+      }
+    }
+    if (configKey.startsWith("env:")) {
+      const envVar = configKey.slice(4);
+      const envValue = process.env[envVar];
+      if (envValue) return envValue;
+      throw new Error(
+        `Parallel API key env var ${envVar} is not set. Set it or configure [mcp.providers.parallel].api_key.`,
+      );
+    }
+    return configKey;
+  }
+
   private logMcpServerSummary(agent: SessionAgent, servers: Map<string, McpServerInfo>): void {
     const parts: string[] = [];
     for (const [name, info] of servers.entries()) {
@@ -1821,6 +1911,20 @@ export class CloudManager {
       );
     }
     this.logger.info(`[cloud] mcp servers agent=${agent} ${parts.join(" ")}`);
+  }
+
+  private extractCodexMcpConfigKeys(args: string[]): string[] {
+    const keys = new Set<string>();
+    for (let i = 0; i < args.length - 1; i += 1) {
+      if (args[i] !== "--config") continue;
+      const value = args[i + 1] ?? "";
+      const match = /^mcp_servers\.((?:"(?:[^"\\]|\\.)+"|[A-Za-z0-9_-]+))\./.exec(value);
+      if (!match) continue;
+      const key = match[1];
+      if (!key) continue;
+      keys.add(key);
+    }
+    return Array.from(keys).sort((a, b) => a.localeCompare(b));
   }
 
   private isBrowserbaseEnabled(): boolean {
@@ -2920,9 +3024,13 @@ AGENTS_EOF`;
     let relayLogPath: string | null = null;
     let cmd = "";
     let env: Record<string, string> = {};
-    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
+    if (opts.agent === "codex") {
+      const keys = this.extractCodexMcpConfigKeys(mcpArgs);
+      this.logger.debug(`[cloud][mcp] codex config keys session=${opts.sessionId} keys=${keys.join(",") || "(none)"}`);
+    }
     const localLogPaths: string[] = [];
 
     if (opts.agent === "claude_code") {
@@ -3214,9 +3322,13 @@ AGENTS_EOF`;
     let cmd = "";
     let env: Record<string, string> = {};
     const playwrightCfg = this.resolvePlaywrightConfig();
-    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.playwright?.server);
+    const mcpConfig = await this.buildRemoteMcpArgs(opts.agent, opts.identityId, opts.prompt, opts.playwright?.server);
     const mcpArgs = mcpConfig.args;
     const mcpEnabled = mcpArgs.length > 0;
+    if (opts.agent === "codex") {
+      const keys = this.extractCodexMcpConfigKeys(mcpArgs);
+      this.logger.debug(`[cloud][mcp] codex config keys session=${opts.sessionId} keys=${keys.join(",") || "(none)"}`);
+    }
 
     if (opts.agent === "claude_code") {
       if (!this.config.claude_code) throw new Error("Claude Code is not configured.");
