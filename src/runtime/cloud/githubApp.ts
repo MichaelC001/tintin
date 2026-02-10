@@ -13,6 +13,7 @@ import {
   getGithubInstallationToken,
 } from "./store.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { startOAuthFlow } from "./oauth.js";
 
 const STATE_PROVIDER = "github_app";
 const TOKEN_REFRESH_BUFFER_MS = 60_000;
@@ -251,7 +252,7 @@ export async function handleGithubAppCallback(opts: {
   cloud: CloudSection;
   installationId: string;
   state: string;
-}): Promise<{ identityId: string; provider: string; metadataJson: string | null }> {
+}): Promise<{ identityId: string; provider: string; metadataJson: string | null; oauthRedirectUrl: string | null }> {
   const cfg = opts.cloud.github_app;
   if (!cfg) throw new Error("Missing [cloud].github_app configuration.");
   const saved = await consumeOAuthState(opts.db, STATE_PROVIDER, opts.state);
@@ -303,5 +304,20 @@ export async function handleGithubAppCallback(opts: {
     metadataJson: null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
-  return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null };
+
+  // Chain to OAuth flow for MCP token if GitHub App has OAuth credentials
+  let oauthRedirectUrl: string | null = null;
+  if (cfg.client_id && cfg.client_secret) {
+    const { authorizeUrl } = await startOAuthFlow({
+      db: opts.db,
+      cloud: opts.cloud,
+      provider: "github",
+      identityId: saved.identity_id,
+      redirectBase: opts.cloud.public_base_url,
+      metadataJson: saved.metadata_json ?? null,
+    });
+    oauthRedirectUrl = authorizeUrl;
+  }
+
+  return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null, oauthRedirectUrl };
 }
