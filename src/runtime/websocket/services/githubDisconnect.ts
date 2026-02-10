@@ -8,9 +8,9 @@ import type { GitHubDisconnectMessage } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { createPendingAction, consumePendingAction } from '../../cloud/store.js';
 import {
-  findAnyGithubConnection,
-  computeOAuthDisconnectImpact,
-  executeOAuthDisconnect,
+  findAllGithubConnections,
+  computeGithubDisconnectImpact,
+  executeGithubDisconnect,
 } from '../../cloud/githubOauthDisconnect.js';
 
 const CONFIRM_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -69,9 +69,8 @@ export class GitHubDisconnectService {
   }
 
   private async handlePreview(connId: string, identityId: string): Promise<void> {
-    // Find any GitHub connection (github_app or github_oauth) for this identity
-    const connection = await findAnyGithubConnection(this.db, identityId);
-    if (!connection) {
+    const connections = await findAllGithubConnections(this.db, identityId);
+    if (connections.length === 0) {
       this.wsManager.sendToConnection(connId, {
         type: 'github_disconnect_response',
         action: 'error',
@@ -80,23 +79,21 @@ export class GitHubDisconnectService {
       return;
     }
 
-    // Compute impact
-    const impact = await computeOAuthDisconnectImpact(this.db, connection.id);
+    const connectionIds = connections.map(c => c.id);
+    const impact = await computeGithubDisconnectImpact(this.db, connectionIds);
 
-    // Generate confirm token
     const token = crypto.randomBytes(24).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    // Store in pending_actions
     await createPendingAction(this.db, {
       action: ACTION_NAME,
       identityId,
       tokenHash,
-      payloadJson: JSON.stringify({ connectionId: connection.id }),
+      payloadJson: JSON.stringify({ connectionIds }),
       ttlMs: CONFIRM_TOKEN_TTL_MS,
     });
 
-    this.logger.info(`[ws] github_disconnect preview id=${connId} repos=${impact.repos} runs=${impact.runs}`);
+    this.logger.info(`[ws] github_disconnect preview id=${connId} connections=${connectionIds.length} repos=${impact.repos} runs=${impact.runs}`);
 
     this.wsManager.sendToConnection(connId, {
       type: 'github_disconnect_response',
@@ -137,7 +134,7 @@ export class GitHubDisconnectService {
     }
 
     // Parse payload
-    let payload: { connectionId: string };
+    let payload: { connectionIds: string[] };
     try {
       payload = JSON.parse(pending.payload_json);
     } catch {
@@ -150,11 +147,11 @@ export class GitHubDisconnectService {
     }
 
     // Execute disconnect
-    const impact = await executeOAuthDisconnect({
+    const impact = await executeGithubDisconnect({
       db: this.db,
       cloud,
       logger: this.logger,
-      connectionId: payload.connectionId,
+      connectionIds: payload.connectionIds,
       identityId,
       cloudManager: this.cloudManager,
     });
