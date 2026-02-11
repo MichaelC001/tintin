@@ -162,15 +162,24 @@ export class GitHubService {
         const githubOAuthConn = connections.find(c => c.type === 'github_oauth');
 
         if (githubAppConn) {
-          connected = true;
           installationId = githubAppConn.installation_id ?? undefined;
           const metadata = parseGithubAppMetadata(githubAppConn.metadata_json);
           accountLogin = metadata?.account_login;
 
-          // Also check installations table for account info
+          // Check installations table for status and account info
+          const installations = await listGithubInstallationsForIdentity(this.db, dbIdentityId);
+          const inst = installationId
+            ? installations.find(i => i.installation_id === installationId)
+            : undefined;
+
+          // P3: Only report connected if installation is active
+          if (inst && inst.status !== "active") {
+            connected = false;
+          } else {
+            connected = true;
+          }
+
           if (!accountLogin) {
-            const installations = await listGithubInstallationsForIdentity(this.db, dbIdentityId);
-            const inst = installations.find(i => i.installation_id === installationId);
             accountLogin = inst?.account_login ?? undefined;
           }
         } else if (githubOAuthConn) {

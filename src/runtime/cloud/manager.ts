@@ -1432,6 +1432,19 @@ export class CloudManager {
     let cloneToken = conn.access_token;
     let cloneUser: string | undefined;
     if (conn.type === "github_app" && this.config.cloud?.github_app) {
+      // P1: Pre-flight DB check — skip API call if installation is already known-invalid
+      if (conn.installation_id) {
+        const inst = await this.db
+          .selectFrom("github_installations")
+          .select(["status"])
+          .where("installation_id", "=", conn.installation_id)
+          .executeTakeFirst();
+        if (inst && inst.status !== "active") {
+          throw new Error(
+            `GitHub App installation is ${inst.status}. Please reconnect GitHub.`,
+          );
+        }
+      }
       const token = await ensureGithubAppToken({
         db: this.db,
         config: this.config.cloud.github_app,
@@ -1455,6 +1468,18 @@ export class CloudManager {
     let token = conn.access_token;
     let user: string | undefined;
     if (conn.type === "github_app" && this.config.cloud?.github_app) {
+      if (conn.installation_id) {
+        const inst = await this.db
+          .selectFrom("github_installations")
+          .select(["status"])
+          .where("installation_id", "=", conn.installation_id)
+          .executeTakeFirst();
+        if (inst && inst.status !== "active") {
+          throw new Error(
+            `GitHub App installation is ${inst.status}. Please reconnect GitHub.`,
+          );
+        }
+      }
       const appToken = await ensureGithubAppToken({
         db: this.db,
         config: this.config.cloud.github_app,
