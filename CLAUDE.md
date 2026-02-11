@@ -36,10 +36,12 @@ npm run migrate        # Database migrations
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  User Interface Layer                                       │
-│  Telegram Bot │ Slack Bot │ WebSocket │ Cloud UI            │
+│  Telegram Bot │ Slack Bot │ Cloud UI                        │
+│                             (HTTP REST + WebSocket)         │
 ├─────────────────────────────────────────────────────────────┤
 │  Service Layer                                              │
 │  service.ts → controller2.ts → controller/* (handlers)      │
+│  githubRoutes (HTTP REST) │ websocket/handler (Agent Exec)  │
 ├─────────────────────────────────────────────────────────────┤
 │  Execution Layer                                            │
 │  SessionManager │ CloudManager │ McpRegistry                │
@@ -60,10 +62,11 @@ npm run migrate        # Database migrations
 | Module | LOC | Responsibility |
 |--------|-----|----------------|
 | **controller2.ts** | 367 | Central BotController - platform dispatch, command routing |
-| **sessionManager.ts** | 1084 | Agent session lifecycle - spawn, monitor, terminate |
-| **cloud/manager.ts** | 4533 | Cloud orchestration - Modal/Local providers |
+| **sessionManager.ts** | 1174 | Agent session lifecycle - spawn, monitor, terminate |
+| **cloud/manager.ts** | 4709 | Cloud orchestration - Modal/Local providers |
 | **streamer/JsonlStreamer.ts** | 843 | JSONL to chat fragments conversion |
-| **websocket/handler.ts** | 306 | WebSocket message routing & auth |
+| **service/http/githubRoutes.ts** | 454 | GitHub HTTP REST API (auth, repos, OAuth, disconnect) |
+| **websocket/handler.ts** | 256 | WebSocket agent execution messaging |
 | **mcp/registry.ts** | - | MCP server lifecycle management |
 
 ## 🔧 File Structure
@@ -76,7 +79,12 @@ src/runtime/
 │   ├── sessionManager.ts       # Session lifecycle
 │   ├── streamer/               # JSONL streaming components
 │   ├── cloud/                  # Cloud execution (30+ files)
-│   ├── websocket/              # WebSocket communication
+│   │   └── repos.ts            # Centralized repo sync logic
+│   ├── service/
+│   │   ├── httpServer.ts       # HTTP server setup & route mounting
+│   │   └── http/
+│   │       └── githubRoutes.ts # GitHub REST API endpoints
+│   ├── websocket/              # WebSocket agent execution
 │   ├── mcp/                    # Model Context Protocol
 │   ├── platform/               # Platform adapters (Telegram/Slack)
 │   └── controller/             # Modular handlers

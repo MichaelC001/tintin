@@ -9,14 +9,15 @@ graph TB
     subgraph UI["User Interface Layer"]
         TG[Telegram Bot]
         SL[Slack Bot]
-        WS[WebSocket]
-        UI[Cloud UI]
+        CUI[Cloud UI]
     end
 
     subgraph Service["Service Layer"]
         SVC[service.ts<br/>HTTP Server]
         CTL[controller2.ts<br/>BotController]
         CTRL[controller/<br/>Modular Handlers]
+        GHR[githubRoutes.ts<br/>GitHub REST API]
+        WSH[websocket/handler<br/>Agent Execution]
     end
 
     subgraph Execution["Execution Layer"]
@@ -45,12 +46,14 @@ graph TB
 
     TG --> SVC
     SL --> SVC
-    WS --> SVC
-    UI --> SVC
+    CUI -->|HTTP REST| GHR
+    CUI -->|WebSocket| WSH
     SVC --> CTL
     CTL --> CTRL
     CTRL --> SM
     CTRL --> CM
+    GHR --> CM
+    WSH --> CM
     SM --> MCP
     SM --> AA
     CM --> AA
@@ -89,8 +92,12 @@ graph TD
     CM --> CS[cloud/<br/>store]
 
     WH --> WSC[websocket/<br/>services/cloud]
-    WH --> WSG[websocket/<br/>services/github]
     WH --> WSI[websocket/<br/>services/identity]
+
+    GHR[service/http/<br/>githubRoutes] --> CR[cloud/<br/>repos]
+    GHR --> GA[cloud/<br/>githubApp]
+    GHR --> OA[cloud/<br/>oauth]
+    GHR --> ST[store]
 
     SM --> AG[agents.ts]
     AG --> JS[streamer/<br/>JsonlStreamer]
@@ -254,6 +261,7 @@ sequenceDiagram
 | Module | Responsibility | Key Methods |
 |--------|----------------|-------------|
 | **service.ts** | HTTP server & bot initialization | start(), handleOAuth() |
+| **service/http/githubRoutes.ts** | GitHub HTTP REST API (auth, repos, OAuth, disconnect) | handleGithubApiRoutes() |
 | **controller2.ts** | Central BotController | handleChat(), handleInteraction() |
 | **controller/telegramHandler.ts** | Telegram-specific handling | handleCommand(), handleCallback() |
 | **controller/slackHandler.ts** | Slack-specific handling | handleCommand(), handleShortcut() |
@@ -265,7 +273,8 @@ sequenceDiagram
 | **cloud/manager.ts** | Cloud run orchestration | startRun(), getLogs(), snapshot() |
 | **cloud/modalProvider.ts** | Modal sandbox provider | createSandbox(), execute() |
 | **cloud/localProvider.ts** | Local provider (testing) | createSandbox(), execute() |
-| **websocket/handler.ts** | WebSocket message routing | handleMessage(), authenticate() |
+| **cloud/repos.ts** | Centralized repo sync logic | syncReposForIdentity(), fetchGithubRepos() |
+| **websocket/handler.ts** | WebSocket agent execution messaging | handleMessage(), authenticate() |
 | **websocket/services/cloud.ts** | CloudRunService | handleCloudRun(), subscribeRun() |
 | **streamer/JsonlStreamer.ts** | JSONL to StreamFragment | pollOnce(), mapToFragment() |
 | **streamer/ToolCallManager.ts** | Tool call/output pairing | push(), shift(), formatPair() |

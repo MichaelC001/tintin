@@ -4,12 +4,11 @@ Detailed documentation of all modules with LOC, responsibilities, and key export
 
 ## Core Modules (`src/runtime/`)
 
-### service.ts (563 LOC)
+### service.ts (522 LOC)
 HTTP server & bot initialization
 
 **Responsibilities:**
 - Express server setup
-- OAuth callbacks (GitHub, Slack, Notion)
 - Bot webhook endpoints
 - UI static file serving
 
@@ -37,7 +36,7 @@ class BotController {
 }
 ```
 
-### sessionManager.ts (1084 LOC)
+### sessionManager.ts (1174 LOC)
 Agent session lifecycle management
 
 **Responsibilities:**
@@ -92,7 +91,7 @@ Claude Code CLI adapter
 - JSONL stdout parsing
 - Process lifecycle
 
-### config.ts (1027 LOC)
+### config.ts (1043 LOC)
 TOML configuration loader
 
 **Responsibilities:**
@@ -119,13 +118,19 @@ function createConnection(config): Promise<Kysely<Database>>
 interface Database { ... }
 ```
 
-### store.ts (345 LOC)
+### store.ts (366 LOC)
 Data access layer
 
 **Responsibilities:**
 - Session CRUD
 - Identity queries
 - Connection management
+- WebSocket identity resolution
+
+**Key Exports:**
+```typescript
+function resolveWebIdentityId(db, wsIdentityId): Promise<string>
+```
 
 ### messaging.ts
 Platform message sending abstraction
@@ -182,7 +187,7 @@ Slack-specific handling
 - Shortcut handling
 - Modal interactions
 
-### cloudHandler.ts (1536 LOC)
+### cloudHandler.ts (1652 LOC)
 Cloud command handling
 
 **Responsibilities:**
@@ -199,7 +204,7 @@ Shared interaction handling
 - Selection handling
 - Response routing
 
-### commands.ts (497 LOC)
+### commands.ts (533 LOC)
 Command parsing utilities
 
 **Key Exports:**
@@ -208,7 +213,7 @@ function parseCommand(text): ParsedCommand | null
 function parseArgs(args): ParsedArgs
 ```
 
-### sessions.ts (265 LOC)
+### sessions.ts (276 LOC)
 Session management commands
 
 **Key Exports:**
@@ -305,7 +310,7 @@ Browser screenshots via MCP
 
 ## Cloud Execution (`src/runtime/cloud/`)
 
-### manager.ts (4533 LOC)
+### manager.ts (4709 LOC)
 Cloud run orchestration
 
 **Responsibilities:**
@@ -336,14 +341,37 @@ class ModalProvider implements CloudProvider {
 }
 ```
 
-### localProvider.ts (4932 LOC)
+### localProvider.ts (124 LOC)
 Local provider for testing
 
-### store.ts (1390 LOC)
+### store.ts (1478 LOC)
 Cloud data access layer
 
-### githubApp.ts (307 LOC)
+### repos.ts (152 LOC)
+Centralized repository sync logic
+
+**Responsibilities:**
+- Fetch GitHub personal repos (paginated)
+- Fetch GitHub App installation repos
+- Sync all repos for an identity with stale indicator
+- Fetch GitLab repos
+
+**Key Exports:**
+```typescript
+function syncReposForIdentity(db, identityId, connections): Promise<{ stale: boolean }>
+function fetchGithubRepos(token): Promise<Repo[]>
+function fetchGithubInstallationRepos(installationId): Promise<Repo[]>
+function fetchGitlabRepos(token): Promise<Repo[]>
+```
+
+### githubApp.ts (375 LOC)
 GitHub App integration
+
+**Key Exports:**
+```typescript
+function parseGithubAppMetadata(metadata): { installation_id, account_login, account_type }
+function isGithubInstallationMissing(installationId): Promise<boolean>
+```
 
 ### githubWebhook.ts (563 LOC)
 GitHub webhook processing
@@ -357,28 +385,53 @@ Notion MCP OAuth integration
 - `registration.ts` - Server registration
 - `token.ts` - Token management
 
+## HTTP API (`src/runtime/service/http/`)
+
+### githubRoutes.ts (454 LOC)
+GitHub HTTP REST API endpoints
+
+**Responsibilities:**
+- GitHub auth status check
+- Repository listing with search/filter
+- GitHub OAuth initiation (OAuth + App flows)
+- Two-phase GitHub disconnect with confirmation
+- Connection listing
+
+**Endpoints:**
+- `GET /api/github/auth-status` - Connection status and account login
+- `GET /api/github/repos` - List repos with search and provider filter
+- `POST /api/github/oauth/start` - Initiate GitHub OAuth or App flow
+- `POST /api/github/disconnect` - Two-step disconnect (preview/confirm)
+- `GET /api/github/connections` - List all OAuth/App connections
+
+**Authentication:** Bearer token via `cloud.proxy.shared_secret`
+
 ## WebSocket Communication (`src/runtime/websocket/`)
 
 ### manager.ts (412 LOC)
 Connection management
 
-### handler.ts (306 LOC)
-Message routing & authentication
+### handler.ts (256 LOC)
+Agent execution message routing & authentication
 
 **Message Types:**
 - `auth` - Authentication
-- `chat` - Chat message
 - `cloud_run` - Start cloud run
-- `subscribe_run` - Subscribe to run updates
+- `subscribe_chat` - Subscribe to chat updates
+- `cloud_follow_up` - Follow-up prompts
+- `cloud_stop` - Stop execution
 
-### services/cloud.ts (714 LOC)
+### services/cloud.ts (800 LOC)
 CloudRunService
-
-### services/github.ts (342 LOC)
-GitHubService
 
 ### services/identity.ts
 IdentityResolver
+
+### services/linkBuilder.ts
+URL builder for run links
+
+### services/sandboxLifecycle.ts (268 LOC)
+Sandbox provisioning
 
 ## MCP Integration (`src/runtime/mcp/`)
 

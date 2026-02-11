@@ -193,6 +193,28 @@ oauth_client_secret = "env:NOTION_CLIENT_SECRET"
 redirect_uri = "http://localhost:3000/notion/callback"
 ```
 
+### `[websocket]` - WebSocket Server Configuration
+
+```toml
+[websocket]
+enabled = true                          # Enable WebSocket server (default: true)
+auth_enabled = true                     # Require token authentication
+path = "/api/ws/chat"                   # WebSocket endpoint path
+# auth_secret = "env:TINTIN_WS_AUTH_SECRET"  # Required when auth_enabled = true
+ping_interval_ms = 30000                # Server ping interval (ms)
+connection_timeout_ms = 60000           # Close inactive connections after (ms)
+auth_timeout_ms = 5000                  # Time allowed for auth after connect (ms)
+max_connections = 1000                  # Maximum total WebSocket connections
+max_connections_per_identity = 5        # Connections per authenticated identity
+max_message_size = 65536                # Maximum message size in bytes (64KB)
+rate_limit_messages_per_sec = 10        # Rate limit per connection
+```
+
+**Notes:**
+- WebSocket is enabled by default even without this section
+- WebSocket handles agent execution only (cloud_run, subscribe_chat, cloud_follow_up, cloud_stop)
+- GitHub operations (repos, OAuth, disconnect) use HTTP REST endpoints instead
+
 ## Environment Variables
 
 Reference env vars in config using `env:VAR_NAME`:
