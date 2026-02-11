@@ -9,7 +9,7 @@ import type { CloudSection } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CloudManager } from "./manager.js";
-import type { GitHubDisconnectImpact } from "../websocket/types.js";
+import type { GitHubDisconnectImpact } from "./types.js";
 import {
   loadDisconnectScope,
   computeImpactFromScope,

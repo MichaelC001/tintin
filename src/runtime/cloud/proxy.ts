@@ -8,7 +8,7 @@ import { fetchWithProxy } from "../httpClient.js";
 import { writeAuditEvent } from "../store.js";
 import { nowMs } from "../util.js";
 
-function base64Url(input: string | Buffer): string {
+export function base64Url(input: string | Buffer): string {
   const raw = Buffer.isBuffer(input) ? input : Buffer.from(input, "utf8");
   return raw.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }

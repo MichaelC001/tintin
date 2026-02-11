@@ -15,6 +15,7 @@ import {
 } from "./store.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
 import { startOAuthFlow } from "./oauth.js";
+import { base64Url } from "./proxy.js";
 
 const STATE_PROVIDER = "github_app";
 const TOKEN_REFRESH_BUFFER_MS = 60_000;
@@ -23,15 +24,6 @@ export interface GithubAppMetadata {
   installation_id: number;
   account_login?: string;
   account_type?: string;
-}
-
-function base64Url(input: Buffer | string): string {
-  const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
-  return buf
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
 }
 
 function normalizePrivateKey(key: string): string {

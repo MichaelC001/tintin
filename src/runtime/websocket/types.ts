@@ -14,32 +14,6 @@ export interface PingMessage {
   type: 'ping';
 }
 
-export interface GetConnectionsMessage {
-  type: 'get_connections';
-}
-
-export interface ListReposMessage {
-  type: 'list_repos';
-  provider?: string;  // 'github' | 'gitlab'
-  search?: string;
-}
-
-export interface GetAuthStatusMessage {
-  type: 'get_auth_status';
-  provider: 'github' | 'gitlab';
-}
-
-export interface StartOAuthMessage {
-  type: 'start_oauth';
-  provider: 'github' | 'gitlab';
-}
-
-export interface GitHubDisconnectMessage {
-  type: 'github_disconnect';
-  action: 'preview' | 'confirm';
-  token?: string;  // Required when action is 'confirm'
-}
-
 // ============ Cloud Run Messages (Client → Server) ============
 
 export interface CloudRunMessage {
@@ -73,11 +47,6 @@ export interface CloudStopMessage {
 export type ClientMessage =
   | AuthMessage
   | PingMessage
-  | GetConnectionsMessage
-  | ListReposMessage
-  | GetAuthStatusMessage
-  | StartOAuthMessage
-  | GitHubDisconnectMessage
   | CloudRunMessage
   | SubscribeChatMessage
   | CloudFollowUpMessage
@@ -165,65 +134,6 @@ export interface PongMessage {
   type: 'pong';
 }
 
-export interface ConnectionsListMessage {
-  type: 'connections_list';
-  connections: Array<{
-    id: string;
-    type: string;
-    installationId?: string;
-    accountLogin?: string;
-    status?: string;
-    createdAt: number;
-  }>;
-}
-
-export interface ReposListMessage {
-  type: 'repos_list';
-  repos: Array<{
-    id: string;
-    name: string;
-    url: string;
-    provider: string;
-    defaultBranch: string | null;
-  }>;
-  total: number;
-}
-
-export interface AuthStatusMessage {
-  type: 'auth_status';
-  provider: string;
-  connected: boolean;
-  accountLogin?: string;
-  installationId?: string;
-}
-
-export interface OAuthStartedMessage {
-  type: 'oauth_started';
-  provider: string;
-  authorizeUrl: string;
-}
-
-export interface GitHubDisconnectImpact {
-  repos: number;
-  runs: number;
-  sessions: number;
-  screenshots: number;
-  snapshots: number;
-}
-
-export interface GitHubDisconnectResponseMessage {
-  type: 'github_disconnect_response';
-  action: 'preview' | 'result' | 'error';
-  // action='preview'
-  impact?: GitHubDisconnectImpact;
-  confirmToken?: string;
-  expiresIn?: number;  // ms
-  // action='result'
-  success?: true;
-  // action='error'
-  error?: string;
-}
-
 // ============ Cloud Run Messages (Server → Client) ============
 
 export interface RunStatusMessage {
@@ -272,11 +182,6 @@ export type ServerMessage =
   | DoneMessage
   | ErrorMessage
   | PongMessage
-  | ConnectionsListMessage
-  | ReposListMessage
-  | AuthStatusMessage
-  | OAuthStartedMessage
-  | GitHubDisconnectResponseMessage
   | RunStatusMessage
   | RunLinksMessage
   | BrowserSessionMessage

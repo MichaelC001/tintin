@@ -3,14 +3,7 @@ import type { CloudOAuthProviderSection, CloudSection } from "../config.js";
 import type { Db } from "../db.js";
 import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection, setGithubMcpToken } from "./store.js";
 import { encryptSecret } from "./secrets.js";
-
-function base64Url(input: Buffer): string {
-  return input
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
+import { base64Url } from "./proxy.js";
 
 export function generateCodeVerifier(): string {
   return base64Url(crypto.randomBytes(32));

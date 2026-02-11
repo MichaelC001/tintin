@@ -31,6 +31,7 @@ import { verifySlackSignature } from "../platform/slack.js";
 import { SLACK_INSTALL_PATH, SLACK_OAUTH_REDIRECT_PATH, handleSlackInstall, handleSlackOauthCallback } from "../slack/oauth.js";
 import { handleAgentRoutes } from "./http/agentRoutes.js";
 import { handleCloudApiRoutes } from "./http/cloudApiRoutes.js";
+import { handleGithubApiRoutes } from "./http/githubRoutes.js";
 
 const buildChatgptOauthSuccessHtml = (lang: UserLanguage): string => {
   const title = escapeHtml(t("chatgpt.oauth.success_title", lang));
@@ -234,6 +235,24 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             db,
             logger,
             resolveSessionLanguage: deps.resolveSessionLanguage,
+          },
+          req,
+          res,
+          url,
+          pathname,
+          pathParts,
+        })
+      ) {
+        return;
+      }
+
+      if (
+        await handleGithubApiRoutes({
+          deps: {
+            config,
+            db,
+            logger,
+            cloudManager: deps.cloudManager,
           },
           req,
           res,

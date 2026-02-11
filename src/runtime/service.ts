@@ -300,40 +300,12 @@ export async function createBotService(deps: BotServiceDeps) {
    * Notify WebSocket client about OAuth completion
    */
   const notifyWebSocketOAuthComplete = async (
-    metadataJson: string | null,
-    provider: string,
-    identityId: string,
+    _metadataJson: string | null,
+    _provider: string,
+    _identityId: string,
   ): Promise<void> => {
-    if (!metadataJson || !wsManager) return;
-    try {
-      const wsMetadata = JSON.parse(metadataJson);
-      if (!wsMetadata.connection_id) return;
-
-      // Get account login for GitHub providers
-      let accountLogin: string | undefined;
-      if (provider === "github") {
-        // For GitHub, account_login is stored in github_installations via the connection's installation_id
-        const connection = await db
-          .selectFrom("connections")
-          .innerJoin("github_installations", "connections.installation_id", "github_installations.installation_id")
-          .select(["github_installations.account_login"])
-          .where("connections.identity_id", "=", identityId)
-          .where("connections.type", "like", "github%")
-          .orderBy("connections.created_at", "desc")
-          .executeTakeFirst();
-        accountLogin = connection?.account_login ?? undefined;
-      }
-
-      wsManager.sendToConnection(wsMetadata.connection_id, {
-        type: 'auth_status',
-        provider,
-        connected: true,
-        accountLogin,
-      });
-      logger.info(`Sent auth_status to WebSocket connection ${wsMetadata.connection_id}`);
-    } catch {
-      // Ignore parse errors
-    }
+    // GitHub OAuth notifications are now handled via HTTP polling (GET /api/github/auth-status).
+    // WS auth_status push was removed as part of the GitHub HTTP migration.
   };
 
   const notifyChatgptConnected = async (metadataJson: string | null) => {

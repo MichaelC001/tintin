@@ -8,7 +8,7 @@ import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth } from './guards.js';
-import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+import { CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export interface PreviewUrlEvent {
   sessionId: string;
@@ -18,8 +18,6 @@ export interface PreviewUrlEvent {
 }
 
 export class WebSocketHandler {
-  private readonly githubService: GitHubService;
-  private readonly githubDisconnectService: GitHubDisconnectService;
   private readonly cloudRunService: CloudRunService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
@@ -36,21 +34,6 @@ export class WebSocketHandler {
     private readonly logger: Logger,
     cloudManager: CloudManager | null = null,
   ) {
-    this.githubService = new GitHubService(
-      wsManager,
-      config,
-      db,
-      logger,
-    );
-
-    this.githubDisconnectService = new GitHubDisconnectService(
-      wsManager,
-      config,
-      db,
-      logger,
-      cloudManager,
-    );
-
     // Initialize sandbox lifecycle service if cloud is enabled
     this.sandboxLifecycleService = cloudManager
       ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
@@ -93,44 +76,6 @@ export class WebSocketHandler {
       case 'ping':
         // Already handled in manager
         break;
-
-      case 'get_connections': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleGetConnections(connId, auth.identityId);
-        break;
-      }
-
-      case 'list_repos': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleListRepos(connId, auth.identityId, {
-          provider: message.provider,
-          search: message.search,
-        });
-        break;
-      }
-
-      case 'get_auth_status': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleGetAuthStatus(connId, auth.identityId, message.provider);
-        break;
-      }
-
-      case 'start_oauth': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleStartOAuth(connId, auth.identityId, message.provider);
-        break;
-      }
-
-      case 'github_disconnect': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubDisconnectService.handleGitHubDisconnect(connId, auth.identityId, message);
-        break;
-      }
 
       case 'cloud_run': {
         const auth = requireAuth(this.wsManager, connId);

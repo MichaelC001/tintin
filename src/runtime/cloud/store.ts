@@ -102,6 +102,16 @@ export async function markIdentityOnboarded(db: Db, identityId: string): Promise
   await db.updateTable("identities").set({ onboarded_at: nowMs(), updated_at: nowMs() }).where("id", "=", identityId).execute();
 }
 
+export async function resolveWebIdentityId(db: Db, wsIdentityId: string): Promise<string> {
+  const userId = wsIdentityId.startsWith('ws:') ? wsIdentityId.slice(3) : wsIdentityId;
+  const identity = await getOrCreateIdentity(db, {
+    platform: 'websocket',
+    workspaceId: null,
+    userId,
+  });
+  return identity.id;
+}
+
 export async function setIdentityActiveRepo(db: Db, identityId: string, repoId: string | null): Promise<void> {
   await db
     .updateTable("identities")
