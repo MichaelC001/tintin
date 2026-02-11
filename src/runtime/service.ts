@@ -296,18 +296,6 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
-  /**
-   * Notify WebSocket client about OAuth completion
-   */
-  const notifyWebSocketOAuthComplete = async (
-    _metadataJson: string | null,
-    _provider: string,
-    _identityId: string,
-  ): Promise<void> => {
-    // GitHub OAuth notifications are now handled via HTTP polling (GET /api/github/auth-status).
-    // WS auth_status push was removed as part of the GitHub HTTP migration.
-  };
-
   const notifyChatgptConnected = async (metadataJson: string | null) => {
     const metadata = parseCloudConnectMetadata(metadataJson);
     if (!metadata) return;
@@ -465,7 +453,6 @@ export async function createBotService(deps: BotServiceDeps) {
     notifyGithubConnected,
     notifyNotionConnected,
     notifyChatgptConnected,
-    notifyWebSocketOAuthComplete,
   });
 
   // WebSocket upgrade handler

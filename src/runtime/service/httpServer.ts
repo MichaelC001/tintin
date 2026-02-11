@@ -95,7 +95,6 @@ export type CreateHttpServerDeps = {
   notifyGithubConnected: (metadataJson: string | null) => Promise<void>;
   notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
-  notifyWebSocketOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
 };
 
 export function createHttpServer(deps: CreateHttpServerDeps) {
@@ -396,7 +395,6 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
               res.writeHead(302, { Location: result.oauthRedirectUrl });
               res.end();
             } else {
-              await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
               await deps.notifyGithubConnected(result.metadataJson);
               sendText(res, 200, "Connected. Return to the chat.");
             }
@@ -416,7 +414,6 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             provider === "notion"
               ? await handleNotionCallback({ db, config, code, state, logger })
               : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
-          await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
           if (result.provider === "github") {
             await deps.notifyGithubConnected(result.metadataJson);
           }
