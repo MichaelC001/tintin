@@ -220,7 +220,7 @@ async function handleStartOAuth(
 
   const dbIdentityId = await resolveWebIdentityId(deps.db, identityId);
 
-  let body: { provider?: string } = {};
+  let body: { provider?: string; returnUrl?: string } = {};
   try {
     const raw = await readRequestBody(req);
     if (raw.trim()) body = JSON.parse(raw);
@@ -237,7 +237,8 @@ async function handleStartOAuth(
   const protocol = host === "localhost" || host === "127.0.0.1" ? "http" : "https";
   const redirectBase = `${protocol}://${host}${port === 80 || port === 443 ? "" : `:${port}`}`;
 
-  const metadataJson = JSON.stringify({ source: "http" });
+  const returnUrl = body.returnUrl && isAllowedReturnUrl(body.returnUrl) ? body.returnUrl : null;
+  const metadataJson = JSON.stringify({ source: "http", ...(returnUrl && { returnUrl }) });
 
   let authorizeUrl: string;
 
@@ -451,4 +452,36 @@ async function handleGetConnections(
 
   sendJson(res, 200, { connections: result });
   return true;
+}
+
+// ============================================================================
+// returnUrl validation (open redirect prevention)
+// ============================================================================
+
+const ALLOWED_RETURN_ORIGINS = (process.env.ALLOWED_REDIRECT_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function isAllowedReturnUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") return true;
+    if (ALLOWED_RETURN_ORIGINS.length === 0) return false;
+    return ALLOWED_RETURN_ORIGINS.includes(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+export function extractReturnUrl(metadataJson: string | null): string | null {
+  if (!metadataJson) return null;
+  try {
+    const parsed = JSON.parse(metadataJson);
+    const url = parsed?.returnUrl;
+    return typeof url === "string" && isAllowedReturnUrl(url) ? url : null;
+  } catch {
+    return null;
+  }
 }

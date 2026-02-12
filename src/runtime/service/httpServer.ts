@@ -31,7 +31,7 @@ import { verifySlackSignature } from "../platform/slack.js";
 import { SLACK_INSTALL_PATH, SLACK_OAUTH_REDIRECT_PATH, handleSlackInstall, handleSlackOauthCallback } from "../slack/oauth.js";
 import { handleAgentRoutes } from "./http/agentRoutes.js";
 import { handleCloudApiRoutes } from "./http/cloudApiRoutes.js";
-import { handleGithubApiRoutes } from "./http/githubRoutes.js";
+import { handleGithubApiRoutes, extractReturnUrl } from "./http/githubRoutes.js";
 
 const buildChatgptOauthSuccessHtml = (lang: UserLanguage): string => {
   const title = escapeHtml(t("chatgpt.oauth.success_title", lang));
@@ -395,8 +395,14 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
               res.writeHead(302, { Location: result.oauthRedirectUrl });
               res.end();
             } else {
-              await deps.notifyGithubConnected(result.metadataJson);
-              sendText(res, 200, "Connected. Return to the chat.");
+              const returnUrl = extractReturnUrl(result.metadataJson);
+              if (returnUrl) {
+                res.writeHead(302, { Location: returnUrl });
+                res.end();
+              } else {
+                await deps.notifyGithubConnected(result.metadataJson);
+                sendText(res, 200, "Connected. Return to the chat.");
+              }
             }
           } catch (e) {
             sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
@@ -414,13 +420,19 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             provider === "notion"
               ? await handleNotionCallback({ db, config, code, state, logger })
               : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
-          if (result.provider === "github") {
-            await deps.notifyGithubConnected(result.metadataJson);
+          const returnUrl = extractReturnUrl(result.metadataJson);
+          if (returnUrl) {
+            res.writeHead(302, { Location: returnUrl });
+            res.end();
+          } else {
+            if (result.provider === "github") {
+              await deps.notifyGithubConnected(result.metadataJson);
+            }
+            if (result.provider === "notion") {
+              await deps.notifyNotionConnected(result.metadataJson);
+            }
+            sendText(res, 200, "Connected. Return to the chat.");
           }
-          if (result.provider === "notion") {
-            await deps.notifyNotionConnected(result.metadataJson);
-          }
-          sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {
           sendText(res, 400, `OAuth failed: ${String(e)}`);
         }
