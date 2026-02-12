@@ -81,6 +81,7 @@ function createMockDb(opts: MockDbOptions = {}) {
       selectAll: () => createChainableMock(table),
       select: () => createChainableMock(table),
       where: () => createChainableMock(table),
+      orderBy: () => createChainableMock(table),
       executeTakeFirst: async () => getResult(),
       execute: async () => {
         const r = getResult();

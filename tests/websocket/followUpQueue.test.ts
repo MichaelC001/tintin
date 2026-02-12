@@ -74,6 +74,7 @@ function createFollowUpDb(sessionStatus: string) {
     selectAll: () => createChainableMock(table),
     select: () => createChainableMock(table),
     where: () => createChainableMock(table),
+    orderBy: () => createChainableMock(table),
     executeTakeFirst: async () => {
       if (table === "cloud_runs") return cloudRun;
       if (table === "sessions") return session;
@@ -144,17 +145,18 @@ test("FollowUpQueue - FIFO order", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "cloud_runs") {
               return { id: "run-123", identity_id: "db-identity-123", session_id: "session-456", status: "finished", provider: "modal", workspace_id: "ws-1" };
             }
             if (t === "sessions") {
               callCount++;
-              // First 2 calls from handleCloudFollowUp -> running (queue it)
-              // 3rd call from processQueuedFollowUps -> finished (resume it)
+              // Each handleCloudFollowUp uses 2 session queries (getLatestSessionForChatId + status check)
+              // 2 calls × 2 queries = 4 queries during queuing, then finished for processQueuedFollowUps
               return {
                 id: "session-456",
-                status: callCount <= 2 ? "running" : "finished",
+                status: callCount <= 4 ? "running" : "finished",
                 agent: "codex", codex_session_id: "csid-1", codex_cwd: "/workspace", project_id: "cloud:test",
               };
             }
@@ -277,6 +279,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "sessions") {
               return {
@@ -331,14 +334,15 @@ test("FollowUpQueue - connection cleanup", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "cloud_runs") {
               return { id: "run-123", identity_id: "db-identity-123", session_id: "session-456", status: "finished", provider: "modal", workspace_id: "ws-1" };
             }
             if (t === "sessions") {
               sessionCallCount++;
-              // handleCloudFollowUp calls: return running
-              if (sessionCallCount <= 1) {
+              // handleCloudFollowUp uses 2 session queries (getLatestSessionForChatId + status check)
+              if (sessionCallCount <= 2) {
                 return { id: "session-456", status: "running", agent: "codex", codex_session_id: "csid-1", codex_cwd: "/workspace", project_id: "cloud:test" };
               }
               // processQueuedFollowUps calls: return finished

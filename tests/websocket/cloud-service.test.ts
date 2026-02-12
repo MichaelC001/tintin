@@ -91,6 +91,7 @@ function createMockDb() {
     selectAll: () => createChainableMock(table),
     select: () => createChainableMock(table),
     where: () => createChainableMock(table),
+    orderBy: () => createChainableMock(table),
     executeTakeFirst: async () => {
       if (table === "identities") return identityResult;
       if (table === "sessions") return null;

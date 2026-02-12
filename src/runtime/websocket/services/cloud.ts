@@ -483,56 +483,55 @@ export class CloudRunService {
 
   /**
    * Process queued follow-up prompts after a session completes.
-   * Called by the sandbox lifecycle / session completion hook.
+   * Called from the session completion hook in service.ts.
+   * Iterates the queue until a follow-up is successfully resumed or the queue is exhausted.
    */
   async processQueuedFollowUps(sessionId: string): Promise<void> {
-    const queue = this.followUpQueues.get(sessionId);
-    if (!queue || queue.length === 0) {
-      this.followUpQueues.delete(sessionId);
-      return;
-    }
+    while (true) {
+      const queue = this.followUpQueues.get(sessionId);
+      if (!queue || queue.length === 0) {
+        this.followUpQueues.delete(sessionId);
+        return;
+      }
 
-    // Take next entry
-    const entry = queue.shift()!;
-    if (queue.length === 0) {
-      this.followUpQueues.delete(sessionId);
-    }
+      const entry = queue.shift()!;
+      if (queue.length === 0) {
+        this.followUpQueues.delete(sessionId);
+      }
 
-    // Check if the connection is still alive
-    const conn = this.wsManager.getConnection(entry.connId);
-    if (!conn) {
-      this.logger.debug(
-        `[ws][cloud] follow-up skipped: connection closed connId=${entry.connId} sessionId=${sessionId}`,
-      );
-      // Try next entry
-      await this.processQueuedFollowUps(sessionId);
-      return;
-    }
+      // Skip entries whose connection has disconnected
+      if (!this.wsManager.getConnection(entry.connId)) {
+        this.logger.debug(
+          `[ws][cloud] follow-up skipped: connection closed connId=${entry.connId} sessionId=${sessionId}`,
+        );
+        continue;
+      }
 
-    const session = await this.db
-      .selectFrom('sessions')
-      .selectAll()
-      .where('id', '=', sessionId)
-      .executeTakeFirst();
+      const session = await this.db
+        .selectFrom('sessions')
+        .selectAll()
+        .where('id', '=', sessionId)
+        .executeTakeFirst();
 
-    if (!session) {
-      this.logger.warn(`[ws][cloud] follow-up skipped: session not found sessionId=${sessionId}`);
-      return;
-    }
+      if (!session) {
+        this.logger.warn(`[ws][cloud] follow-up skipped: session not found sessionId=${sessionId}`);
+        return;
+      }
 
-    try {
-      await this.resumeFollowUp(entry.connId, entry.runId, sessionId, session as SessionRow, entry.prompt);
-    } catch (err) {
-      this.logger.error(
-        `[ws][cloud] processQueuedFollowUps error sessionId=${sessionId}: ${String(err)}`,
-      );
-      this.wsManager.sendToConnection(entry.connId, {
-        type: 'error',
-        code: ErrorCodes.SERVICE_ERROR,
-        message: `Failed to process queued follow-up: ${String(err)}`,
-      });
-      // Continue processing queue even on error
-      await this.processQueuedFollowUps(sessionId);
+      try {
+        await this.resumeFollowUp(entry.connId, entry.runId, sessionId, session as SessionRow, entry.prompt);
+        return; // Successfully started, exit loop
+      } catch (err) {
+        this.logger.error(
+          `[ws][cloud] processQueuedFollowUps error sessionId=${sessionId}: ${String(err)}`,
+        );
+        this.wsManager.sendToConnection(entry.connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: `Failed to process queued follow-up: ${String(err)}`,
+        });
+        // Continue loop to try next entry
+      }
     }
   }
 

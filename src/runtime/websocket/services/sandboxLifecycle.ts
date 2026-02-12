@@ -18,7 +18,6 @@ import { IdentityResolver } from './identity.js';
  */
 export class SandboxLifecycleService {
   private readonly identityResolver: IdentityResolver;
-  private onSessionCompleteCallback: ((sessionId: string, connId: string) => void) | null = null;
 
   constructor(
     private readonly wsManager: WebSocketManager,
@@ -214,55 +213,4 @@ export class SandboxLifecycleService {
     this.logger.debug(`[sandbox] marked ready connId=${connId}`);
   }
 
-  /**
-   * Mark sandbox as ready and notify via callback.
-   * Used when a session completes to transition the sandbox and trigger follow-up processing.
-   */
-  markReadyAndNotify(connId: string): void {
-    const conn = this.wsManager.getConnection(connId);
-    if (!conn?.sandbox) return;
-
-    const sessionId = conn.sandbox.sessionId;
-    conn.sandbox.status = 'ready';
-    conn.sandbox.runId = null;
-    conn.sandbox.sessionId = null;
-
-    this.logger.debug(`[sandbox] marked ready (with notify) connId=${connId} sessionId=${sessionId}`);
-
-    if (sessionId && this.onSessionCompleteCallback) {
-      this.onSessionCompleteCallback(sessionId, connId);
-    }
-  }
-
-  /**
-   * Register a callback to be called when a session completes.
-   * Used to wire up follow-up queue processing.
-   */
-  setOnSessionComplete(callback: (sessionId: string, connId: string) => void): void {
-    this.onSessionCompleteCallback = callback;
-  }
-
-  /**
-   * Check if sandbox is ready for a new run.
-   */
-  isReady(connId: string): boolean {
-    const conn = this.wsManager.getConnection(connId);
-    return conn?.sandbox?.status === 'ready';
-  }
-
-  /**
-   * Check if sandbox is currently in use.
-   */
-  isInUse(connId: string): boolean {
-    const conn = this.wsManager.getConnection(connId);
-    return conn?.sandbox?.status === 'in_use';
-  }
-
-  /**
-   * Check if sandbox is still provisioning.
-   */
-  isProvisioning(connId: string): boolean {
-    const conn = this.wsManager.getConnection(connId);
-    return conn?.sandbox?.status === 'provisioning';
-  }
 }
