@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { formatToolPairMessage } from "../../src/runtime/streamer/eventMappers/helpers.js";
+import type { PendingToolCall } from "../../src/runtime/streamer/types.js";
 
 /**
  * Tests for tool_output separation feature.
@@ -45,7 +46,6 @@ test("formatToolPairMessage for TG/Slack compatibility", async (t) => {
       maxMessageChars: 100,
     });
 
-    // Should be within maxMessageChars
     assert.ok(result.length <= 100);
     assert.ok(result.startsWith("```\n"));
     assert.ok(result.endsWith("\n```"));
@@ -58,42 +58,35 @@ test("formatToolPairMessage for TG/Slack compatibility", async (t) => {
       maxMessageChars: 3500,
     });
 
-    // Should escape inner ``` to prevent markdown issues
-    // The function uses zero-width space to break up the backticks
     assert.ok(!result.includes("\n```bash\n"));
   });
 });
 
 test("PendingToolCall structure", async (t) => {
-  /**
-   * The pendingToolCalls map now stores structured objects instead of plain strings.
-   * This allows tool_output to include the original tool name.
-   */
-
-  await t.test("should contain text and toolName fields", () => {
-    interface PendingToolCall {
-      text: string;
-      toolName: string;
-    }
-
+  await t.test("should contain text, toolName, and optional toolInput fields", () => {
     const pending: PendingToolCall = {
       text: "$ npm install",
       toolName: "Bash",
+      toolInput: "npm install",
     };
 
     assert.equal(typeof pending.text, "string");
     assert.equal(typeof pending.toolName, "string");
     assert.equal(pending.text, "$ npm install");
     assert.equal(pending.toolName, "Bash");
+    assert.equal(pending.toolInput, "npm install");
   });
 
-  await t.test("should allow undefined toolName to fall back to 'unknown'", () => {
-    interface PendingToolCall {
-      text: string;
-      toolName: string;
-    }
+  await t.test("should allow undefined toolInput", () => {
+    const pending: PendingToolCall = {
+      text: "MCP github.create_issue",
+      toolName: "github.create_issue",
+    };
 
-    // When toolName is not available, we use "unknown"
+    assert.equal(pending.toolInput, undefined);
+  });
+
+  await t.test("should allow 'unknown' as toolName fallback", () => {
     const pending: PendingToolCall = {
       text: "some call",
       toolName: "unknown",
@@ -103,17 +96,51 @@ test("PendingToolCall structure", async (t) => {
   });
 });
 
-test("SessionMessage tool_output type", async (t) => {
-  /**
-   * The SessionMessage union type now includes tool_output variant.
-   */
+test("SessionMessage tool_call type", async (t) => {
+  await t.test("should have required fields", () => {
+    interface ToolCallMessage {
+      type: "tool_call";
+      name: string;
+      input?: string;
+      priority?: "user" | "background";
+    }
 
+    const message: ToolCallMessage = {
+      type: "tool_call",
+      name: "Bash",
+      input: "ls -la",
+      priority: "user",
+    };
+
+    assert.equal(message.type, "tool_call");
+    assert.equal(message.name, "Bash");
+    assert.equal(message.input, "ls -la");
+  });
+
+  await t.test("should allow optional input", () => {
+    interface ToolCallMessage {
+      type: "tool_call";
+      name: string;
+      input?: string;
+    }
+
+    const message: ToolCallMessage = {
+      type: "tool_call",
+      name: "Read",
+    };
+
+    assert.equal(message.input, undefined);
+  });
+});
+
+test("SessionMessage tool_output type", async (t) => {
   await t.test("should have required fields", () => {
     interface ToolOutputMessage {
       type: "tool_output";
       name: string;
       output: string;
       callText?: string;
+      formatAsCode?: boolean;
       priority?: "user" | "background";
     }
 
@@ -132,13 +159,13 @@ test("SessionMessage tool_output type", async (t) => {
     assert.equal(message.priority, "user");
   });
 
-  await t.test("should allow optional callText", () => {
+  await t.test("should allow optional callText and formatAsCode", () => {
     interface ToolOutputMessage {
       type: "tool_output";
       name: string;
       output: string;
       callText?: string;
-      priority?: "user" | "background";
+      formatAsCode?: boolean;
     }
 
     const message: ToolOutputMessage = {
@@ -148,15 +175,33 @@ test("SessionMessage tool_output type", async (t) => {
     };
 
     assert.equal(message.callText, undefined);
+    assert.equal(message.formatAsCode, undefined);
   });
 });
 
-test("WebSocket ToolOutputMessage", async (t) => {
-  /**
-   * The WebSocket protocol sends structured tool_output messages.
-   */
+test("WebSocket tool messages", async (t) => {
+  await t.test("should have correct tool_call format", () => {
+    interface WsToolCallMessage {
+      type: "tool_call";
+      sessionId: string;
+      name: string;
+      input?: string;
+    }
 
-  await t.test("should have correct WebSocket message format", () => {
+    const wsMessage: WsToolCallMessage = {
+      type: "tool_call",
+      sessionId: "session-123",
+      name: "Bash",
+      input: "ls -la",
+    };
+
+    assert.equal(wsMessage.type, "tool_call");
+    assert.equal(wsMessage.sessionId, "session-123");
+    assert.equal(wsMessage.name, "Bash");
+    assert.equal(wsMessage.input, "ls -la");
+  });
+
+  await t.test("should have correct tool_output format", () => {
     interface WsToolOutputMessage {
       type: "tool_output";
       sessionId: string;
@@ -178,8 +223,6 @@ test("WebSocket ToolOutputMessage", async (t) => {
   });
 
   await t.test("should not include callText in WebSocket message", () => {
-    // WebSocket messages don't need callText because the frontend already
-    // received the tool_call message with the input
     interface WsToolOutputMessage {
       type: "tool_output";
       sessionId: string;
@@ -194,7 +237,6 @@ test("WebSocket ToolOutputMessage", async (t) => {
       output: "result",
     };
 
-    // Verify no callText field
     assert.ok(!("callText" in wsMessage));
   });
 });
