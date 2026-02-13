@@ -19,7 +19,8 @@ export interface PingMessage {
 export interface CloudRunMessage {
   type: 'cloud_run';
   chatId: string;                // stable conversation id from website
-  repoIds?: string[];              // repo IDs (empty array = playground mode)
+  projectId?: string;              // project ID (preferred over repoIds)
+  repoIds?: string[];              // repo IDs (deprecated, use projectId)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
   language?: string;               // optional, language code (e.g., 'en', 'zh')

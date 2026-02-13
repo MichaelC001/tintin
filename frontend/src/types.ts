@@ -4,7 +4,9 @@ export interface RunSummary {
   id: string;
   status: CloudRunStatus;
   provider: string;
-  primary_repo_id: string | null;
+  project_id: string | null;
+  project_name: string | null;
+  project_type: string | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;

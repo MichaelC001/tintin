@@ -210,17 +210,38 @@ export async function handleCloudApiRoutes(params: {
         sendJson(res, 200, { runs: [], nextCursor: null });
         return true;
       }
-      sendJson(res, 200, { runs: [run], nextCursor: null });
+      let project_name: string | null = null;
+      let project_type: string | null = null;
+      if (run.project_id) {
+        const proj = await db.selectFrom("projects").select(["name", "type"]).where("id", "=", run.project_id).executeTakeFirst();
+        if (proj) { project_name = proj.name; project_type = proj.type; }
+      }
+      sendJson(res, 200, { runs: [{ ...run, project_name, project_type }], nextCursor: null });
       return true;
     }
     const limitRaw = url.searchParams.get("limit");
     const cursorRaw = url.searchParams.get("cursor");
     const limit = limitRaw ? Number(limitRaw) : undefined;
     const before = cursorRaw ? Number(cursorRaw) : undefined;
-    const runs = await listCloudRunsForIdentity(db, {
+    const rawRuns = await listCloudRunsForIdentity(db, {
       identityId: payload.identity_id,
       limit: Number.isFinite(limit) ? limit : undefined,
       before: Number.isFinite(before) ? before : undefined,
+    });
+    // Enrich with project info
+    const projectIds = rawRuns.map((r) => r.project_id).filter((id): id is string => id !== null);
+    const projectMap = new Map<string, { name: string; type: string }>();
+    if (projectIds.length > 0) {
+      const projects = await db
+        .selectFrom("projects")
+        .select(["id", "name", "type"])
+        .where("id", "in", projectIds)
+        .execute();
+      for (const p of projects) projectMap.set(p.id, { name: p.name, type: p.type });
+    }
+    const runs = rawRuns.map((r) => {
+      const proj = r.project_id ? projectMap.get(r.project_id) : null;
+      return { ...r, project_name: proj?.name ?? null, project_type: proj?.type ?? null };
     });
     const nextCursor = runs.length > 0 ? runs[runs.length - 1]!.created_at : null;
     sendJson(res, 200, { runs, nextCursor });
@@ -341,14 +362,12 @@ export async function handleCloudApiRoutes(params: {
           root = path.join(config.cloud.workspaces_dir, run.workspace_id);
         }
         if (root) {
-          const mount = run.primary_repo_id
-            ? await db
-                .selectFrom("cloud_run_repos")
-                .select(["mount_path"])
-                .where("run_id", "=", run.id)
-                .where("repo_id", "=", run.primary_repo_id)
-                .executeTakeFirst()
-            : null;
+          const mount = await db
+            .selectFrom("cloud_run_repos")
+            .select(["mount_path"])
+            .where("run_id", "=", run.id)
+            .orderBy("id", "asc")
+            .executeTakeFirst() ?? null;
           const repoRoot = mount ? path.join(root, mount.mount_path) : root;
           baselineResolver = async (filePath: string) => {
             const full = path.join(repoRoot, filePath);

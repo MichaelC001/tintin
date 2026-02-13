@@ -65,6 +65,7 @@ import {
   getParallelApiKey,
   getLatestSetupSpec,
   getLatestRunForIdentity,
+  getProject,
   listSecrets,
   listSnapshotsByIdentity,
   listSnapshotsByRun,
@@ -74,6 +75,7 @@ import {
   updateCloudRun,
   upsertCloudSnapshot,
 } from "./store.js";
+import { isPlayground, type Project } from "./project.js";
 import {
   createSession,
   deleteSessionOffsets,
@@ -237,7 +239,87 @@ export class CloudManager {
   }
 
   private normalizeCloudProjectId(run: CloudRunsTable): string {
-    return run.primary_repo_id ? `cloud:${run.primary_repo_id}` : `cloud:playground:${run.id}`;
+    return run.project_id ? `cloud:${run.project_id}` : `cloud:playground:${run.id}`;
+  }
+
+  private getMainProjectPath(
+    mounts: Array<{ absPath: string }>,
+    workspace: CloudWorkspace,
+  ): string {
+    return mounts.length > 0 ? mounts[0]!.absPath : workspace.rootPath;
+  }
+
+  private async discoverSetupSpec(
+    mainRepoAbsPath: string,
+    projectId: string,
+    existingSpec: Awaited<ReturnType<typeof getLatestSetupSpec>> | null,
+  ): Promise<Awaited<ReturnType<typeof getLatestSetupSpec>> | null> {
+    if (existingSpec) return existingSpec;
+    const specPath = path.join(mainRepoAbsPath, "tintin-setup.yml");
+    const specText = await readFile(specPath, "utf8").catch(() => null);
+    if (!specText) return null;
+    const hash = hashSetupSpec(specText);
+    await putSetupSpec(this.db, { projectId, ymlBlob: specText, hash });
+    return await getLatestSetupSpec(this.db, projectId) ?? null;
+  }
+
+  private async applySetupSpec(opts: {
+    workspace: CloudWorkspace;
+    setupSpec: { yml_blob: string };
+    cwd: string;
+    identityId: string;
+  }): Promise<void> {
+    const spec = parseSetupSpec(opts.setupSpec.yml_blob);
+    const secrets = await this.time(
+      "secrets.load",
+      () => this.loadSecretsMap(opts.identityId),
+      `identity=${opts.identityId}`,
+      "debug",
+    );
+    const envVars: Record<string, string> = {};
+    for (const entry of spec.env ?? []) {
+      if (!entry.value) continue;
+      envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
+    }
+
+    if (spec.files && spec.files.length > 0) {
+      const files = spec.files
+        .filter((f) => f.content !== undefined)
+        .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
+      if (files.length > 0) {
+        await this.time(
+          "setupSpec.uploadFiles",
+          () => this.provider.uploadFiles(opts.workspace, files),
+          `files=${files.length}`,
+        );
+      }
+    }
+
+    const commands = spec.commands ?? [];
+    if (commands.length > 0) {
+      this.logger.info(`[cloud] applying setup spec commands count=${commands.length}`);
+      await this.time(
+        "setupSpec.runCommands",
+        () => this.provider.runCommands({ workspace: opts.workspace, cwd: opts.cwd, commands, env: envVars }),
+        `commands=${commands.length}`,
+      );
+    }
+  }
+
+  private async initPlaygroundDir(
+    workspace: CloudWorkspace,
+    runId: string,
+  ): Promise<{ repoId: null; mountPath: string; absPath: string }> {
+    const mountPath = path.posix.join("repo", "playground");
+    const absPath = this.joinWorkspacePath(workspace.rootPath, mountPath);
+    await this.provider.runCommands({
+      workspace,
+      cwd: workspace.rootPath,
+      commands: [`mkdir -p ${absPath}`, `git init ${absPath}`],
+      env: {},
+    });
+    await addRunRepo(this.db, { runId, repoId: null, mountPath });
+    return { repoId: null, mountPath, absPath };
   }
 
   private resolveEmbeddingConfig(): EmbeddingConfig | null {
@@ -519,7 +601,27 @@ export class CloudManager {
     if (this.provider.id !== "modal") throw new Error("Snapshot restore is only supported for modal provider.");
     const snap = await getCloudSnapshot(this.db, opts.snapshotId);
     if (!snap || snap.identity_id !== opts.identityId) throw new Error("Snapshot not found.");
+    const originalRun = await getCloudRun(this.db, snap.run_id);
     const repoIds = await listRunRepoIds(this.db, snap.run_id);
+    // Resolve project from original run, or infer from repo IDs
+    const { getOrCreatePlaygroundProject, getOrCreateRepoProject } = await import("./store.js");
+    let project: Project;
+    if (originalRun?.project_id) {
+      const p = await getProject(this.db, originalRun.project_id);
+      if (p) {
+        project = { id: p.id, identityId: p.identity_id, type: p.type as "repo" | "playground", repoId: p.repo_id, name: p.name };
+      } else {
+        const fallback = repoIds.length === 0
+          ? await getOrCreatePlaygroundProject(this.db, opts.identityId)
+          : await getOrCreateRepoProject(this.db, opts.identityId, repoIds[0]!, "repo");
+        project = { id: fallback.id, identityId: fallback.identity_id, type: fallback.type as "repo" | "playground", repoId: fallback.repo_id, name: fallback.name };
+      }
+    } else {
+      const fallback = repoIds.length === 0
+        ? await getOrCreatePlaygroundProject(this.db, opts.identityId)
+        : await getOrCreateRepoProject(this.db, opts.identityId, repoIds[0]!, "repo");
+      project = { id: fallback.id, identityId: fallback.identity_id, type: fallback.type as "repo" | "playground", repoId: fallback.repo_id, name: fallback.name };
+    }
     return await this.startRun({
       identityId: opts.identityId,
       platform: opts.platform,
@@ -528,9 +630,9 @@ export class CloudManager {
       spaceId: opts.spaceId,
       userId: opts.userId,
       prompt: `Continue from snapshot ${snap.id}`,
+      project,
       repoIds,
       agent: opts.agent,
-      playground: repoIds.length === 0,
       restoreSnapshotId: snap.id,
     });
   }
@@ -924,22 +1026,22 @@ export class CloudManager {
     spaceId: string;
     userId: string;
     prompt: string;
+    project: Project;
     repoIds: string[];
     agent: SessionAgent;
-    playground?: boolean;
     restoreSnapshotId?: string | null;
   }): Promise<{ runId: string; sessionId: string; cdpUrl: string | null }> {
     this.ensureEnabled();
-    const isPlayground = opts.playground === true;
-    if (opts.repoIds.length === 0 && !isPlayground) throw new Error("No repo selected.");
-    const primaryRepoId = opts.repoIds[0] ?? null;
+    if (opts.repoIds.length === 0 && !isPlayground(opts.project)) throw new Error("No repo selected.");
+    const primaryRepoId = opts.project.repoId;
+    const projectId = opts.project.id;
     const runStartMs = Date.now();
     const runStartTs = new Date(runStartMs).toISOString();
     this.logger.info(
       `[cloud][timing] run start ts=${runStartTs} identity=${opts.identityId} repos=${opts.repoIds.length} agent=${opts.agent}`,
     );
 
-    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, projectId) : null;
     let setupSnapshotId: string | null = opts.restoreSnapshotId ?? setupSpec?.snapshot_id ?? null;
     let usedSnapshot = false;
     let workspace: CloudWorkspace;
@@ -982,7 +1084,7 @@ export class CloudManager {
     }
     const run = await createCloudRun(this.db, {
       identityId: opts.identityId,
-      primaryRepoId,
+      projectId: opts.project.id,
       provider: this.provider.id,
       workspaceId: workspace.id,
       status: "queued",
@@ -1039,52 +1141,16 @@ export class CloudManager {
       }
 
       // Apply setup spec if present (DB or repo file).
-      if (repoMounts.length > 0 && primaryRepoId && !setupSpec) {
-        const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
-        const specText = await readFile(specPath, "utf8").catch(() => null);
-        if (specText) {
-          const hash = hashSetupSpec(specText);
-          await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
-          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
-        }
+      if (repoMounts.length > 0 && primaryRepoId) {
+        setupSpec = await this.discoverSetupSpec(repoMounts[0]!.absPath, projectId, setupSpec);
       }
       if (setupSpec && !usedSnapshot) {
-        const spec = parseSetupSpec(setupSpec.yml_blob);
-        const secrets = await this.time(
-          "secrets.load",
-          () => this.loadSecretsMap(opts.identityId),
-          `identity=${opts.identityId}`,
-          "debug",
-        );
-        const envVars: Record<string, string> = {};
-        for (const entry of spec.env ?? []) {
-          if (!entry.value) continue;
-          envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
-        }
-
-        if (spec.files && spec.files.length > 0) {
-          const files = spec.files
-            .filter((f) => f.content !== undefined)
-            .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
-          if (files.length > 0) {
-            await this.time(
-              "setupSpec.uploadFiles",
-              () => this.provider.uploadFiles(workspace, files),
-              `files=${files.length}`,
-            );
-          }
-        }
-
-        const mainRepoPath = repoMounts[0]!.absPath;
-        const commands = spec.commands ?? [];
-        if (commands.length > 0) {
-          this.logger.info(`[cloud] applying setup spec commands count=${commands.length}`);
-          await this.time(
-            "setupSpec.runCommands",
-            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands, env: envVars }),
-            `commands=${commands.length}`,
-          );
-        }
+        await this.applySetupSpec({
+          workspace,
+          setupSpec,
+          cwd: repoMounts[0]!.absPath,
+          identityId: opts.identityId,
+        });
         setupSnapshotId = await this.time("setupSpec.snapshot", () => this.provider.snapshotWorkspace(workspace, "setup"));
         await updateCloudRun(this.db, run.id, { snapshot_id: setupSnapshotId });
         if (setupSpec.id) {
@@ -1098,8 +1164,8 @@ export class CloudManager {
         }
       }
 
-      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
-      const projectId = primaryRepoId ? `cloud:${primaryRepoId}` : `cloud:playground:${run.id}`;
+      const mainRepoPath = this.getMainProjectPath(repoMounts, workspace);
+      const normalizedProjectId = this.normalizeCloudProjectId(run);
       if (this.provider.id !== "local") {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
         sessionId = await this.time(
@@ -1113,7 +1179,7 @@ export class CloudManager {
               spaceId: opts.spaceId,
               userId: opts.userId,
               runId: run.id,
-              projectId,
+              projectId: normalizedProjectId,
               projectPath: mainRepoPath,
               prompt: opts.prompt,
               agent: opts.agent,
@@ -1138,7 +1204,7 @@ export class CloudManager {
               chatId: opts.chatId,
               spaceId: opts.spaceId,
               userId: opts.userId,
-              projectId,
+              projectId: normalizedProjectId,
               projectPathResolved: mainRepoPath,
               initialPrompt: opts.prompt,
               agent: opts.agent,
@@ -3847,8 +3913,9 @@ AGENTS_EOF`;
       .execute();
 
     const hasRepos = runRepos.length > 0;
-    const primaryRepoId = hasRepos ? run.primary_repo_id ?? runRepos[0]!.repo_id : null;
-    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+    const primaryRepoId = hasRepos ? runRepos[0]!.repo_id : null;
+    const projectId = run.project_id;
+    let setupSpec = projectId ? await getLatestSetupSpec(this.db, projectId) : null;
     let setupSnapshotId: string | null = setupSpec?.snapshot_id ?? run.snapshot_id ?? null;
     let usedSnapshot = false;
     const language = this.resolveSessionLanguage(session);
@@ -3905,6 +3972,7 @@ AGENTS_EOF`;
     try {
       const repoMounts = hasRepos
         ? runRepos
+            .filter((r): r is typeof r & { repo_id: string } => r.repo_id !== null)
             .map((r) => ({
               repoId: r.repo_id,
               mountPath: r.mount_path,
@@ -3943,52 +4011,16 @@ AGENTS_EOF`;
         }
       }
 
-      if (repoMounts.length > 0 && !setupSpec) {
-        const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
-        const specText = await readFile(specPath, "utf8").catch(() => null);
-        if (specText && primaryRepoId) {
-          const hash = hashSetupSpec(specText);
-          await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
-          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
-        }
+      if (repoMounts.length > 0 && projectId) {
+        setupSpec = await this.discoverSetupSpec(repoMounts[0]!.absPath, projectId, setupSpec);
       }
       if (setupSpec && !usedSnapshot && repoMounts.length > 0) {
-        const spec = parseSetupSpec(setupSpec.yml_blob);
-        const secrets = await this.time(
-          "secrets.load",
-          () => this.loadSecretsMap(run.identity_id),
-          `identity=${run.identity_id}`,
-          "debug",
-        );
-        const envVars: Record<string, string> = {};
-        for (const entry of spec.env ?? []) {
-          if (!entry.value) continue;
-          envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
-        }
-
-        if (spec.files && spec.files.length > 0) {
-          const files = spec.files
-            .filter((f) => f.content !== undefined)
-            .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
-          if (files.length > 0) {
-            await this.time(
-              "setupSpec.uploadFiles",
-              () => this.provider.uploadFiles(workspace, files),
-              `files=${files.length}`,
-            );
-          }
-        }
-
-        const mainRepoPath = repoMounts[0]!.absPath;
-        const commands = spec.commands ?? [];
-        if (commands.length > 0) {
-          this.logger.info(`[cloud] applying setup spec commands count=${commands.length}`);
-          await this.time(
-            "setupSpec.runCommands",
-            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands, env: envVars }),
-            `commands=${commands.length}`,
-          );
-        }
+        await this.applySetupSpec({
+          workspace,
+          setupSpec,
+          cwd: repoMounts[0]!.absPath,
+          identityId: run.identity_id,
+        });
         setupSnapshotId = await this.time("setupSpec.snapshot", () => this.provider.snapshotWorkspace(workspace, "setup"));
         if (setupSpec.id) {
           await updateSetupSpecSnapshot(this.db, { id: setupSpec.id, snapshotId: setupSnapshotId });
@@ -4001,7 +4033,7 @@ AGENTS_EOF`;
         }
       }
 
-      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
+      const mainRepoPath = this.getMainProjectPath(repoMounts, workspace);
       await updateSession(this.db, session.id, {
         status: "starting",
         exit_code: null,
@@ -4149,8 +4181,7 @@ AGENTS_EOF`;
     if (!run) throw new Error(`Cloud run not found for session ${sessionId}`);
     const runRepos = await this.db.selectFrom("cloud_run_repos").selectAll().where("run_id", "=", run.id).execute();
     if (runRepos.length === 0) throw new Error(`Cloud run ${run.id} has no repos`);
-    const primaryRepoId = run.primary_repo_id ?? runRepos[0]!.repo_id;
-    const mount = runRepos.find((r) => r.repo_id === primaryRepoId) ?? runRepos[0]!;
+    const mount = runRepos[0]!;
     const repo = await this.db.selectFrom("repos").selectAll().where("id", "=", mount.repo_id).executeTakeFirst();
     if (!repo) throw new Error(`Repo not found for run ${run.id}`);
     const workspace = this.workspaceFromId(run.workspace_id);
@@ -4331,18 +4362,14 @@ AGENTS_EOF`;
       .selectFrom("cloud_run_repos")
       .selectAll()
       .where("run_id", "=", run.id)
-      .where("repo_id", "=", run.primary_repo_id ?? "")
+      .orderBy("id", "asc")
       .executeTakeFirst();
     const cwd = mount ? path.join(workspace.rootPath, mount.mount_path) : workspace.rootPath;
     let diff: { diff: string; summary: string } | null = null;
-    if (run.primary_repo_id) {
-      try {
-        diff = await this.provider.pullDiff({ workspace, cwd });
-      } catch (e) {
-        this.logger.warn(`[cloud] diff pull failed session=${sessionId}: ${String(e)}`);
-      }
-    } else {
-      diff = { diff: "", summary: "Playground run (no repo attached)." };
+    try {
+      diff = await this.provider.pullDiff({ workspace, cwd });
+    } catch (e) {
+      this.logger.warn(`[cloud] diff pull failed session=${sessionId}: ${String(e)}`);
     }
     const maxPatch = 200_000;
     const patch = diff ? (diff.diff.length > maxPatch ? null : diff.diff) : null;
@@ -4492,15 +4519,15 @@ AGENTS_EOF`;
     spaceId: string;
     userId: string;
     prompt: string;
+    project: Project;
     repoIds: string[];
     agent: SessionAgent;
-    playground?: boolean;
     restoreSnapshotId?: string | null;
   }): Promise<{ runId: string; sessionId: string; cdpUrl: string | null }> {
     this.ensureEnabled();
-    const isPlayground = opts.playground === true;
-    if (opts.repoIds.length === 0 && !isPlayground) throw new Error("No repo selected.");
-    const primaryRepoId = opts.repoIds[0] ?? null;
+    if (opts.repoIds.length === 0 && !isPlayground(opts.project)) throw new Error("No repo selected.");
+    const primaryRepoId = opts.project.repoId;
+    const projectId = opts.project.id;
     const runStartMs = Date.now();
     const runStartTs = new Date(runStartMs).toISOString();
 
@@ -4513,13 +4540,13 @@ AGENTS_EOF`;
     const workspace = opts.workspace;
 
     // Setup spec handling for snapshot restoration
-    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, primaryRepoId) : null;
+    let setupSpec = primaryRepoId ? await getLatestSetupSpec(this.db, projectId) : null;
     let setupSnapshotId: string | null = opts.restoreSnapshotId ?? setupSpec?.snapshot_id ?? null;
 
     // Create run record
     const run = await createCloudRun(this.db, {
       identityId: opts.identityId,
-      primaryRepoId,
+      projectId: opts.project.id,
       provider: this.provider.id,
       workspaceId: workspace.id,
       status: "queued",
@@ -4572,58 +4599,21 @@ AGENTS_EOF`;
       }
 
       // Apply setup spec if present
-      if (repoMounts.length > 0 && primaryRepoId && !setupSpec) {
-        const specPath = path.join(repoMounts[0]!.absPath, "tintin-setup.yml");
-        const specText = await readFile(specPath, "utf8").catch(() => null);
-        if (specText) {
-          const hash = hashSetupSpec(specText);
-          await putSetupSpec(this.db, { repoId: primaryRepoId, ymlBlob: specText, hash });
-          setupSpec = await getLatestSetupSpec(this.db, primaryRepoId);
-        }
+      if (repoMounts.length > 0 && primaryRepoId) {
+        setupSpec = await this.discoverSetupSpec(repoMounts[0]!.absPath, projectId, setupSpec);
       }
-
       if (setupSpec) {
-        const spec = parseSetupSpec(setupSpec.yml_blob);
-        const secrets = await this.time(
-          "secrets.load",
-          () => this.loadSecretsMap(opts.identityId),
-          `identity=${opts.identityId}`,
-          "debug",
-        );
-        const envVars: Record<string, string> = {};
-        for (const entry of spec.env ?? []) {
-          if (!entry.value) continue;
-          envVars[entry.name] = interpolateSecrets(entry.value, (name) => secrets.get(name) ?? null);
-        }
-
-        if (spec.files && spec.files.length > 0) {
-          const files = spec.files
-            .filter((f) => f.content !== undefined)
-            .map((f) => ({ path: f.path, content: f.content ?? "", mode: f.mode }));
-          if (files.length > 0) {
-            await this.time(
-              "setupSpec.uploadFiles",
-              () => this.provider.uploadFiles(workspace, files),
-              `files=${files.length}`,
-            );
-          }
-        }
-
-        const mainRepoPath = repoMounts[0]!.absPath;
-        const commands = spec.commands ?? [];
-        if (commands.length > 0) {
-          this.logger.info(`[cloud] applying setup spec commands count=${commands.length}`);
-          await this.time(
-            "setupSpec.runCommands",
-            () => this.provider.runCommands({ workspace, cwd: mainRepoPath, commands, env: envVars }),
-            `commands=${commands.length}`,
-          );
-        }
+        await this.applySetupSpec({
+          workspace,
+          setupSpec,
+          cwd: repoMounts[0]!.absPath,
+          identityId: opts.identityId,
+        });
       }
 
       // Start the session
-      const mainRepoPath = repoMounts.length > 0 ? repoMounts[0]!.absPath : workspace.rootPath;
-      const projectId = primaryRepoId ? `cloud:${primaryRepoId}` : `cloud:playground:${run.id}`;
+      const mainRepoPath = this.getMainProjectPath(repoMounts, workspace);
+      const normalizedProjectId = this.normalizeCloudProjectId(run);
 
       if (this.provider.id !== "local") {
         this.logger.info(`[cloud] starting remote session run=${run.id} workspace=${workspace.id}`);
@@ -4638,7 +4628,7 @@ AGENTS_EOF`;
               spaceId: opts.spaceId,
               userId: opts.userId,
               runId: run.id,
-              projectId,
+              projectId: normalizedProjectId,
               projectPath: mainRepoPath,
               prompt: opts.prompt,
               agent: opts.agent,
@@ -4663,7 +4653,7 @@ AGENTS_EOF`;
               chatId: opts.chatId,
               spaceId: opts.spaceId,
               userId: opts.userId,
-              projectId,
+              projectId: normalizedProjectId,
               projectPathResolved: mainRepoPath,
               initialPrompt: opts.prompt,
               agent: opts.agent,

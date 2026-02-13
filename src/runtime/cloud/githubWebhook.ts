@@ -384,11 +384,20 @@ async function clearGithubAppConnections(opts: { db: Db; installationId: string 
     .execute();
   const repoIds = repoRows.map((row) => row.id);
   if (repoIds.length > 0) {
-    await opts.db
-      .updateTable("identities")
-      .set({ active_repo_id: null, updated_at: now })
-      .where("active_repo_id", "in", repoIds)
+    // Clear active_project_id for projects linked to these repos
+    const linkedProjects = await opts.db
+      .selectFrom("projects")
+      .select("id")
+      .where("repo_id", "in", repoIds)
       .execute();
+    const projectIds = linkedProjects.map((p) => p.id);
+    if (projectIds.length > 0) {
+      await opts.db
+        .updateTable("identities")
+        .set({ active_project_id: null, updated_at: now })
+        .where("active_project_id", "in", projectIds)
+        .execute();
+    }
   }
   await opts.db
     .updateTable("connections")

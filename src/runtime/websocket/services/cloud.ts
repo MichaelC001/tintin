@@ -8,7 +8,8 @@ import { ErrorCodes } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { CloudLinkBuilder } from './linkBuilder.js';
 import type { SandboxLifecycleService } from './sandboxLifecycle.js';
-import { listReposForIdentity, getCloudRunBySession } from '../../cloud/store.js';
+import { listReposForIdentity, getCloudRunBySession, getProject, getOrCreatePlaygroundProject, getOrCreateRepoProject } from '../../cloud/store.js';
+import { isPlayground as isPlaygroundProject, type Project } from '../../cloud/project.js';
 import { mapDbStatusToWsStatus } from '../../cloud/types.js';
 import { countConcurrentSessionsForUser, countSessionsForUser, getLatestSessionForChat } from '../../store.js';
 import type { SessionRow } from '../../store.js';
@@ -112,8 +113,35 @@ export class CloudRunService {
 
     try {
       const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
-      const repoIds = message.repoIds ?? [];
-      const isPlayground = repoIds.length === 0;
+
+      // Resolve project: prefer projectId, fall back to repoIds
+      let project: Project;
+      let repoIds: string[];
+      if (message.projectId) {
+        const p = await getProject(this.db, message.projectId);
+        if (!p) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.INVALID_MESSAGE,
+            message: 'Project not found',
+          });
+          return;
+        }
+        project = { id: p.id, identityId: p.identity_id, type: p.type as "repo" | "playground", repoId: p.repo_id, name: p.name };
+        repoIds = p.repo_id ? [p.repo_id] : [];
+      } else {
+        const msgRepoIds = message.repoIds ?? [];
+        repoIds = msgRepoIds;
+        if (msgRepoIds.length === 0) {
+          const pg = await getOrCreatePlaygroundProject(this.db, dbIdentityId);
+          project = { id: pg.id, identityId: pg.identity_id, type: pg.type as "repo" | "playground", repoId: pg.repo_id, name: pg.name };
+        } else {
+          const repo = await this.db.selectFrom("repos").select("name").where("id", "=", msgRepoIds[0]!).executeTakeFirst();
+          const rp = await getOrCreateRepoProject(this.db, dbIdentityId, msgRepoIds[0]!, repo?.name ?? "repo");
+          project = { id: rp.id, identityId: rp.identity_id, type: rp.type as "repo" | "playground", repoId: rp.repo_id, name: rp.name };
+        }
+      }
+      const isPlayground = isPlaygroundProject(project);
       const virtualChatId = this.buildVirtualChatId(conn.identityId!, chatId);
 
       const identityOk = await this.assertIdentitySessionLimits(connId, dbIdentityId);
@@ -193,9 +221,9 @@ export class CloudRunService {
           spaceId: virtualSpaceId,
           userId: conn.identityId!,
           prompt,
+          project,
           repoIds,
           agent,
-          playground: isPlayground,
           restoreSnapshotId,
         });
 
@@ -217,9 +245,9 @@ export class CloudRunService {
           spaceId: virtualSpaceId,
           userId: conn.identityId!,
           prompt,
+          project,
           repoIds,
           agent,
-          playground: isPlayground,
           restoreSnapshotId,
         });
 

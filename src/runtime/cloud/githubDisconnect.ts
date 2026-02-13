@@ -61,12 +61,17 @@ export async function computeGithubDisconnectImpact(db: Db, installationId: stri
           .where("repo_id", "in", scope.repoIds)
           .executeTakeFirst()
       : null;
-  const setupSpecs =
+  // Count setup specs via projects linked to these repos
+  const linkedProjectIds =
     scope.repoIds.length > 0
+      ? (await db.selectFrom("projects").select("id").where("repo_id", "in", scope.repoIds).execute()).map((p) => p.id)
+      : [];
+  const setupSpecs =
+    linkedProjectIds.length > 0
       ? await db
           .selectFrom("setup_specs")
           .select(({ fn }) => fn.count("id").as("count"))
-          .where("repo_id", "in", scope.repoIds)
+          .where("project_id", "in", linkedProjectIds)
           .executeTakeFirst()
       : null;
   const runLinks =
