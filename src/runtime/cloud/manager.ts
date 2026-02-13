@@ -3192,7 +3192,7 @@ AGENTS_EOF`;
         relayConfig = { token, url: relayUrl };
         relayLogPath = await this.ensureAgentLogPath(opts.sessionId, "exec");
         localLogPaths.push(relayLogPath);
-        this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl}`);
+        this.logger.info(`[cloud] log relay enabled session=${opts.sessionId} url=${relayUrl} logPath=${relayLogPath}`);
       } else {
         this.logger.info(`[cloud] log relay disabled session=${opts.sessionId} (missing cloud.public_base_url)`);
       }
@@ -3671,6 +3671,7 @@ AGENTS_EOF`;
           }
         });
       }
+      this.logger.debug(`[cloud][debug] session=${opts.sessionId} stopping ${opts.logSyncers.length} log syncer(s)`);
       for (const syncer of opts.logSyncers) syncer.stop();
       for (const syncer of opts.logSyncers) await syncer.drain().catch(() => {});
       try {
@@ -3705,7 +3706,9 @@ AGENTS_EOF`;
       }
       if (this.sessionManager) {
         try {
+          this.logger.debug(`[cloud][debug] session=${opts.sessionId} starting final drain`);
           await this.sessionManager.drainSession(opts.sessionId);
+          this.logger.debug(`[cloud][debug] session=${opts.sessionId} final drain completed`);
         } catch (e) {
           this.logger.warn(`[cloud] final drain failed session=${opts.sessionId}: ${String(e)}`);
         }

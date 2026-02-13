@@ -146,6 +146,9 @@ export class JsonlStreamer {
   private async pollOnce(onlySessionIds?: string[]) {
     const sessions = await listRunningSessions(this.db);
     const runningSessionIds = new Set<string>();
+    if (onlySessionIds) {
+      this.logger.debug(`[streamer][debug] pollOnce called for specific sessions: ${onlySessionIds.join(",")} running_count=${sessions.length}`);
+    }
     for (const session of sessions) {
       if (onlySessionIds && !onlySessionIds.includes(session.id)) continue;
       runningSessionIds.add(session.id);
@@ -154,7 +157,10 @@ export class JsonlStreamer {
       else this.playwrightScreenshots.unmarkCloudSession(session.id);
       this.noteUserActivity(session.id, session.last_user_message_at, session.created_at);
       this.ensureTurnState(session.id);
-      if (!session.codex_session_id) continue;
+      if (!session.codex_session_id) {
+        this.logger.debug(`[streamer][debug] session=${session.id} skipped: no codex_session_id, status=${session.status} platform=${session.platform}`);
+        continue;
+      }
       const messageVerbosity = await this.resolveMessageVerbosity(session);
       const adapter = getAgentAdapter(session.agent);
       let agentConfig: { max_catchup_lines: number } | null = null;
@@ -170,6 +176,7 @@ export class JsonlStreamer {
 
       const offsets = await listSessionOffsets(this.db, session.id);
       if (offsets.length === 0) {
+        this.logger.debug(`[streamer][debug] session=${session.id} no offsets, discovering files sessionsRoot=${sessionsRoot} cwd=${session.codex_cwd} codex_session_id=${session.codex_session_id}`);
         const files = await adapter.findSessionJsonlFiles({
           sessionsRoot,
           homeDir,
@@ -178,7 +185,10 @@ export class JsonlStreamer {
           timeoutMs: 1,
           pollMs: 1,
         });
-        if (files.length === 0) continue;
+        if (files.length === 0) {
+          this.logger.debug(`[streamer][debug] session=${session.id} no JSONL files found`);
+          continue;
+        }
         for (const f of files) {
           const initialOffset = await computeCatchupOffsetBytes(f, agentConfig.max_catchup_lines).catch(() => 0);
           await upsertSessionOffset(this.db, {
@@ -192,16 +202,20 @@ export class JsonlStreamer {
         continue;
       }
 
+      this.logger.debug(`[streamer][debug] session=${session.id} found ${offsets.length} offset(s): ${offsets.map(o => `${o.jsonl_path}@${o.byte_offset}`).join(", ")}`);
+
       let finalize = false;
       for (const off of offsets) {
         let read;
         try {
           read = await readNewJsonlLines(off.jsonl_path, off.byte_offset);
-        } catch {
+        } catch (e) {
+          this.logger.debug(`[streamer][debug] session=${session.id} readNewJsonlLines failed path=${off.jsonl_path}: ${String(e)}`);
           continue;
         }
         const { lines, newOffset } = read;
         if (lines.length === 0) continue;
+        this.logger.debug(`[streamer][debug] session=${session.id} read ${lines.length} lines from ${off.jsonl_path} offset=${off.byte_offset}->${newOffset}`);
         await upsertSessionOffset(this.db, {
           ...off,
           id: off.id,
@@ -234,17 +248,21 @@ export class JsonlStreamer {
             if (this.planUpdates.shouldSuppressPlanOutput(obj, session.id)) continue;
 
             const mapper = EVENT_MAPPERS[session.agent];
-            fragments.push(
-              ...mapper(obj, {
+            const mapped = mapper(obj, {
                 includeUserMessages: session.platform !== "telegram" && session.platform !== "websocket",
                 verbosity: messageVerbosity,
                 lang,
-              }),
-            );
+              });
+            if (mapped.length > 0) {
+              this.logger.debug(`[streamer][debug] session=${session.id} mapper produced ${mapped.length} fragment(s): ${mapped.map(f => f.kind).join(",")}`);
+            }
+            fragments.push(...mapped);
           } catch {
             continue;
           }
         }
+
+        this.logger.debug(`[streamer][debug] session=${session.id} total fragments=${fragments.length} from ${lines.length} lines`);
 
         for (const frag of fragments) {
           if (frag.kind === "final") {

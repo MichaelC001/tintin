@@ -475,7 +475,12 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
     if (!session) return;
     const lang = deps.resolveSessionLanguage(session);
 
+    const msgType = (message as any).type ?? (typeof (message as any).text === "string" ? "text" : "unknown");
     const wsManager = deps.getWsManager();
+    const hasSubs = wsManager?.hasSubscribers(sessionId) ?? false;
+    if (session.platform === "websocket") {
+      deps.logger.debug(`[sendToSession][debug] session=${sessionId} msgType=${msgType} platform=${session.platform} wsHasSubscribers=${hasSubs}`);
+    }
     if (wsManager?.hasSubscribers(sessionId)) {
       let wsMessage: ServerMessage | null = null;
       if (message.type === "finalize") {
@@ -516,7 +521,12 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
         }
       }
       if (wsMessage) {
+        if (session.platform === "websocket") {
+          deps.logger.debug(`[sendToSession][debug] session=${sessionId} broadcasting wsMessage type=${wsMessage.type}`);
+        }
         wsManager.broadcastToSession(sessionId, wsMessage);
+      } else if (session.platform === "websocket") {
+        deps.logger.debug(`[sendToSession][debug] session=${sessionId} wsMessage is null for msgType=${msgType}`);
       }
     }
 

@@ -219,6 +219,7 @@ export async function handleAgentRoutes(params: {
       sendText(res, 500, "log path unavailable");
       return true;
     }
+    deps.logger.debug(`[agent-relay][debug] session=${ctx.sessionId} received ${payload.length} bytes, appending to ${logPath}`);
     await appendFile(logPath, payload);
     sendText(res, 200, "ok");
     return true;
