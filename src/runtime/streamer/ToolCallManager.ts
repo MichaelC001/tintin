@@ -1,3 +1,5 @@
+import type { PendingToolCall } from "./types.js";
+
 /**
  * ToolCallManager - Manages pending tool calls queue for pairing calls with outputs.
  *
@@ -6,14 +8,14 @@
  * corresponding tool_output fragments.
  */
 export class ToolCallManager {
-  private readonly pending = new Map<string, string[]>();
+  private readonly pending = new Map<string, PendingToolCall[]>();
 
   /**
-   * Push a tool call text to the queue for a session.
+   * Push a tool call to the queue for a session.
    */
-  push(sessionId: string, callText: string): void {
+  push(sessionId: string, call: PendingToolCall): void {
     const q = this.pending.get(sessionId) ?? [];
-    q.push(callText);
+    q.push(call);
     this.pending.set(sessionId, q);
   }
 
@@ -21,14 +23,14 @@ export class ToolCallManager {
    * Shift (remove and return) the oldest tool call from the queue.
    * Returns null if the queue is empty or doesn't exist.
    */
-  shift(sessionId: string): string | null {
+  shift(sessionId: string): PendingToolCall | null {
     const q = this.pending.get(sessionId);
     if (!q || q.length === 0) return null;
-    const callText = q.shift()!;
+    const call = q.shift()!;
     if (q.length === 0) {
       this.pending.delete(sessionId);
     }
-    return callText;
+    return call;
   }
 
   /**
