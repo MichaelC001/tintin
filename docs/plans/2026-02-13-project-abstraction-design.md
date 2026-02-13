@@ -223,4 +223,43 @@ interface CloudRunMessage {
 | `src/runtime/cloud/lift.ts` | No change | generateSetupSpecFromPath is project-agnostic |
 | `src/runtime/cloud/setupSpec.ts` | No change | Parse/stringify logic is project-agnostic |
 
-**Total: 2 new files, 13 modified files, 0 deleted files**
+**Total: 2 new files, 15 modified files, 0 deleted files**
+
+## Appendix: Review Corrections (2026-02-13)
+
+### A. Mainstream Platform Alignment
+
+Our design follows the **CodeSandbox Hybrid** pattern (standalone sandbox + repo-backed project coexist under a unified entity). Compared to 5 mainstream platforms (Replit, CodeSandbox, Gitpod, GitHub Codespaces, StackBlitz), the design is well-aligned. No structural changes needed.
+
+### B. Identified Gaps (post-review)
+
+#### B.1 Bug: `manager.ts:4334` — empty string query for playground mounts
+
+Current code queries `cloud_run_repos` with `repo_id = ""` when `primary_repo_id` is null, which always returns nothing. After migration, playground mounts will have `repo_id = null`. Fix: query by `run_id` only, take first mount.
+
+#### B.2 `listRunRepoIds` needs null filtering
+
+`store.ts:441` returns `repo_id[]`. After making `repo_id` nullable, the return type becomes `(string | null)[]`. Callers like `restoreSnapshot` expect `string[]`. Fix: filter null values.
+
+#### B.3 `detectLatestSnapshot` and `restoreSnapshot` not covered
+
+`manager.ts:408-536` — these methods use `primary_repo_id` for snapshot queries and `listRunRepoIds` for playground inference. Must be updated to use `project_id`.
+
+#### B.4 `githubWebhook.ts` has `addRunRepo` call
+
+`src/runtime/cloud/githubWebhook.ts:67` — additional caller of `addRunRepo` not in original file list. Must be updated when `addRunRepo` signature changes.
+
+#### B.5 `tests/e2e/agents-md-e2e.test.ts` uses `repoIds: []`
+
+3 test cases use old WebSocket message format. Must be updated in Task 7.
+
+### C. Additional Files to Modify
+
+| File | Reason |
+|------|--------|
+| `src/runtime/cloud/githubWebhook.ts` | Calls `addRunRepo`, references `active_repo_id` |
+| `tests/e2e/agents-md-e2e.test.ts` | Uses `repoIds: []` in WebSocket messages |
+
+### D. Unchanged Tables (confirmed)
+
+- `shared_repos` — repo-level sharing in TG/Slack chats. Stays as-is (repo_id, not project_id). This is correct because sharing is about giving chat access to a specific git repo, not about the project abstraction.

@@ -318,6 +318,16 @@ export async function listCloudRunsForProject(db: Db, projectId: string, limit =
 }
 ```
 
+Fix `listRunRepoIds` — filter null repo_id values:
+
+```typescript
+export async function listRunRepoIds(db: Db, runId: string): Promise<string[]> {
+  const rows = await db.selectFrom("cloud_run_repos").select("repo_id")
+    .where("run_id", "=", runId).execute();
+  return rows.map(r => r.repo_id).filter((id): id is string => id !== null);
+}
+```
+
 **Step 4: Run tests**
 
 Run: `npm run build && node --test dist/tests/cloud/project.test.js`
@@ -573,13 +583,22 @@ if (isPlayground(opts.project)) {
 
 Apply the same pattern to `startRunWithWorkspace`.
 
-**Step 6: Update handleSessionFinished**
+**Step 6: Update handleSessionFinished (manager.ts:4322-4377)**
 
-Remove the `if (run.primary_repo_id)` branch. Unified:
+Remove the `if (run.primary_repo_id)` branch. Fix the existing bug at line 4334 where
+`repo_id = ""` is queried for playground runs. Unified:
 
 ```typescript
+// Before (buggy for playground: queries repo_id = "" which never matches)
 const mount = await this.db.selectFrom("cloud_run_repos").selectAll()
   .where("run_id", "=", run.id)
+  .where("repo_id", "=", run.primary_repo_id ?? "")
+  .executeTakeFirst();
+
+// After (query by run_id only, take first mount — works for both repo and playground)
+const mount = await this.db.selectFrom("cloud_run_repos").selectAll()
+  .where("run_id", "=", run.id)
+  .orderBy("id", "asc")
   .executeTakeFirst();
 const cwd = mount ? path.join(workspace.rootPath, mount.mount_path) : workspace.rootPath;
 try {
@@ -589,7 +608,19 @@ try {
 }
 ```
 
-**Step 7: Update all callers**
+**Step 7: Update detectLatestSnapshot and restoreSnapshot (manager.ts:408-536)**
+
+These methods use `primary_repo_id` for snapshot queries and `listRunRepoIds` for
+playground inference. Update to use `project_id`:
+
+```typescript
+// detectLatestSnapshot: change query to filter by project_id
+// restoreSnapshot: replace `playground: repoIds.length === 0` with project type check
+const project = await getProject(this.db, run.project_id!);
+// pass project to startRun instead of playground boolean
+```
+
+**Step 8: Update all callers**
 
 Modify `src/runtime/websocket/services/cloud.ts` to resolve project before calling startRun/startRunWithWorkspace:
 
@@ -713,7 +744,9 @@ git commit -m "refactor(controller): replace playground conditionals with Projec
 **Files:**
 - Modify: `src/runtime/websocket/types.ts`
 - Modify: `src/runtime/websocket/services/cloud.ts`
+- Modify: `src/runtime/cloud/githubWebhook.ts` (calls `addRunRepo`, references `active_repo_id`)
 - Test: `tests/websocket/cloud-service.test.ts`
+- Test: `tests/e2e/agents-md-e2e.test.ts` (uses `repoIds: []` in WebSocket messages)
 
 **Step 1: Update CloudRunMessage type**
 
@@ -749,19 +782,42 @@ Remove `isPlayground` from status messages — use `isPlayground(project)`.
 
 Remove `playground: isPlayground` from startRun/startRunWithWorkspace calls — pass `project` instead.
 
-**Step 3: Update existing tests**
+**Step 3: Update githubWebhook.ts**
+
+Update `addRunRepo` call at line 67 to pass nullable `repoId`. Update any `active_repo_id` references to `active_project_id`:
+
+```typescript
+// Update addRunRepo call to match new signature (repoId is now nullable)
+await addRunRepo(db, { runId, repoId: repoId ?? null, mountPath });
+
+// Update active_repo_id references (~line 389-390)
+// Before: identity.active_repo_id
+// After: identity.active_project_id (resolve project from project_id)
+```
+
+**Step 4: Update existing tests**
 
 In `tests/websocket/cloud-service.test.ts`, update mock `CloudRunMessage` to use `projectId` instead of `repoIds`.
 
-**Step 4: Build and run tests**
+In `tests/e2e/agents-md-e2e.test.ts`, update 3 test cases that use `repoIds: []` to use `projectId`:
 
-Run: `npm run build && node --test dist/tests/websocket/cloud-service.test.js`
+```typescript
+// Before
+{ type: "cloud_run", repoIds: [], ... }
+
+// After
+{ type: "cloud_run", projectId: "<playground-project-id>", ... }
+```
+
+**Step 5: Build and run tests**
+
+Run: `npm run build && npm run test`
 Expected: PASS
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
-git add src/runtime/websocket/types.ts src/runtime/websocket/services/cloud.ts tests/websocket/cloud-service.test.ts
+git add src/runtime/websocket/types.ts src/runtime/websocket/services/cloud.ts src/runtime/cloud/githubWebhook.ts tests/websocket/cloud-service.test.ts tests/e2e/agents-md-e2e.test.ts
 git commit -m "refactor(websocket): replace repoIds with projectId in CloudRunMessage"
 ```
 
