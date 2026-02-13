@@ -120,13 +120,23 @@ export function mapEventMsgPayload(
     }
     case "mcp_tool_call_begin": {
       if (!includeTools) return [];
-      const call = formatMcpInvocation(payload.invocation);
-      return call ? [{ kind: "tool_call", text: call }] : [];
+      const invocation = payload.invocation;
+      const call = formatMcpInvocation(invocation);
+      if (!call) return [];
+      const server = invocation && typeof invocation === "object" ? stringOrEmpty((invocation as any).server) : "";
+      const tool = invocation && typeof invocation === "object" ? stringOrEmpty((invocation as any).tool) : "";
+      const label = [server, tool].filter(Boolean).join(".");
+      return [{ kind: "tool_call", text: call, toolName: label || "mcp" }];
     }
     case "mcp_tool_call_end": {
       if (!includeTools) return [];
-      const summary = formatMcpToolResult(payload.result, payload.invocation, lang);
-      return summary ? [{ kind: "tool_output", text: summary }] : [];
+      const invocation = payload.invocation;
+      const summary = formatMcpToolResult(payload.result, invocation, lang);
+      if (!summary) return [];
+      const server = invocation && typeof invocation === "object" ? stringOrEmpty((invocation as any).server) : "";
+      const tool = invocation && typeof invocation === "object" ? stringOrEmpty((invocation as any).tool) : "";
+      const label = [server, tool].filter(Boolean).join(".");
+      return [{ kind: "tool_output", text: summary, toolName: label || "mcp" }];
     }
     case "web_search_begin":
       if (!includeTools) return [];
