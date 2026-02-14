@@ -374,6 +374,47 @@ sequenceDiagram
     O-->>U: Setup complete
 ```
 
+## WebSocket Tool Call/Output Streaming Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as Agent CLI
+    participant JL as JSONL File
+    participant JS as JsonlStreamer
+    participant EM as EventMappers
+    participant MSG as SessionMessenger
+    participant WS as WebSocket
+    participant P as Platform (TG/Slack)
+
+    CLI->>JL: Write tool_use event
+    JS->>JL: pollOnce() - read new lines
+    JL-->>JS: JSONL events
+
+    JS->>EM: mapToFragment()
+    EM-->>JS: StreamFragment (tool_call)
+
+    JS->>MSG: sendToSession()
+
+    alt Has WebSocket subscribers
+        MSG->>WS: {"type": "tool_call", "name": "Bash", ...}
+    end
+
+    MSG->>P: Format as text for TG/Slack
+
+    CLI->>JL: Write tool_result event
+    JS->>JL: pollOnce()
+    JS->>EM: mapToFragment()
+    EM-->>JS: StreamFragment (tool_output)
+
+    JS->>MSG: sendToSession()
+
+    alt Has WebSocket subscribers
+        MSG->>WS: {"type": "tool_output", "content": "..."}
+    end
+
+    MSG->>P: Format as text for TG/Slack
+```
+
 ## Message Verbosity Levels
 
 ```mermaid

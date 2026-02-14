@@ -28,11 +28,14 @@ node dist/tinc.js lift|pull|attach
 | Path | Purpose |
 |------|---------|
 | `src/runtime/controller2.ts` | Central BotController (367 LOC) |
-| `src/runtime/sessionManager.ts` | Session lifecycle (1084 LOC) |
-| `src/runtime/streamer/JsonlStreamer.ts` | JSONL streaming (843 LOC) |
-| `src/runtime/cloud/manager.ts` | Cloud orchestration (4533 LOC) |
-| `src/runtime/mcp/registry.ts` | MCP server registry |
-| `src/runtime/websocket/handler.ts` | WebSocket routing (306 LOC) |
+| `src/runtime/sessionManager.ts` | Session lifecycle (1174 LOC) |
+| `src/runtime/streamer/JsonlStreamer.ts` | JSONL streaming (840 LOC) |
+| `src/runtime/cloud/manager.ts` | Cloud orchestration (4699 LOC) |
+| `src/runtime/service/sessionMessenger.ts` | Platform message formatting & WS routing (752 LOC) |
+| `src/runtime/service/http/agentRoutes.ts` | Agent log relay & cloud API (888 LOC) |
+| `src/runtime/service/http/githubRoutes.ts` | GitHub REST API (487 LOC) |
+| `src/runtime/mcp/registry.ts` | MCP server registry (108 LOC) |
+| `src/runtime/websocket/handler.ts` | WebSocket routing (256 LOC) |
 | `config.toml` | Configuration file |
 
 ## 🏗️ Architecture Layers
@@ -80,11 +83,13 @@ await cloudManager.startRun(identityId, repoIds, prompt);
 | Category | Modules |
 |----------|---------|
 | **Core** | service.ts, controller2.ts, sessionManager.ts |
-| **Controller** | telegramHandler.ts, slackHandler.ts, cloudHandler.ts |
-| **Session** | SessionStateMachine.ts, ProcessLifecycleManager.ts, EnvironmentBuilder.ts |
-| **Cloud** | manager.ts, modalProvider.ts, localProvider.ts, githubApp.ts |
-| **WebSocket** | manager.ts, handler.ts, services/cloud.ts |
-| **MCP** | registry.ts, factory.ts, providers/ |
+| **Controller** | telegramHandler.ts, slackHandler.ts, cloudHandler.ts, interactionHandler.ts |
+| **Service** | httpServer.ts, sessionMessenger.ts, http/agentRoutes.ts, http/cloudApiRoutes.ts, http/githubRoutes.ts |
+| **Session** | SessionStateMachine.ts, ProcessLifecycleManager.ts, EnvironmentBuilder.ts, ChatGptProxyManager.ts |
+| **Streamer** | JsonlStreamer.ts, ToolCallManager.ts, PlanUpdateHandler.ts, eventMappers/ |
+| **Cloud** | manager.ts, store.ts, modalProvider.ts, localProvider.ts, githubApp.ts, notion/ |
+| **WebSocket** | manager.ts, handler.ts, services/cloud.ts, services/sandboxLifecycle.ts |
+| **MCP** | registry.ts, factory.ts, providers/ (stdio, http, github, exa, parallel, playwright) |
 | **Platform** | telegram.ts, slack.ts |
 
 ## 🔗 Full Documentation

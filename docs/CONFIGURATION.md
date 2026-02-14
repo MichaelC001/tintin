@@ -149,6 +149,14 @@ type = "github"
 # Notion MCP (requires OAuth)
 [[mcp.providers]]
 type = "notion"
+
+# Exa search API
+[[mcp.providers]]
+type = "exa"
+
+# Parallel execution
+[[mcp.providers]]
+type = "parallel"
 ```
 
 **Provider Types:**
@@ -159,6 +167,8 @@ type = "notion"
 | `http` | HTTP transport | Remote MCP servers |
 | `github` | GitHub integration | Repo operations, PRs |
 | `notion` | Notion integration | Database, pages |
+| `exa` | Exa search API | Web search, content retrieval |
+| `parallel` | Parallel execution | Multi-task concurrent execution |
 
 ### `[chatgpt]` - ChatGPT OAuth
 
