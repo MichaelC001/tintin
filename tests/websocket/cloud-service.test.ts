@@ -85,20 +85,23 @@ function createMockCloudManager(options: MockCloudManagerOptions = {}) {
 }
 
 function createMockDb() {
-  // Create a chainable mock that handles the Kysely query pattern
-  const createChainableMock = (result: unknown) => ({
-    selectAll: () => createChainableMock(result),
-    select: () => createChainableMock(result),
-    where: () => createChainableMock(result),
-    executeTakeFirst: async () => result,
-    execute: async () => (Array.isArray(result) ? result : []),
-  });
-
-  // Return identity with id for getOrCreateIdentity
   const identityResult = { id: "db-identity-123" };
 
+  const createChainableMock = (table: string) => ({
+    selectAll: () => createChainableMock(table),
+    select: () => createChainableMock(table),
+    where: () => createChainableMock(table),
+    orderBy: () => createChainableMock(table),
+    executeTakeFirst: async () => {
+      if (table === "identities") return identityResult;
+      if (table === "sessions") return null;
+      return identityResult;
+    },
+    execute: async () => [],
+  });
+
   return {
-    selectFrom: () => createChainableMock(identityResult),
+    selectFrom: (table: string) => createChainableMock(table),
     insertInto: () => ({
       values: () => ({
         execute: async () => {},
@@ -112,6 +115,10 @@ function createMockConfig(): AppConfig {
     cloud: {
       default_agent: "codex",
       ui_base_url: "https://example.com",
+    },
+    security: {
+      max_sessions_per_identity: 1000,
+      max_concurrent_sessions_per_identity: 100,
     },
   } as unknown as AppConfig;
 }
@@ -132,6 +139,8 @@ function createMockConnection(identityId = "ws-identity-123"): WSConnection {
 
 // ============ Tests ============
 
+const baseChatId = "chat-123";
+
 test("CloudRunService handleCloudRun", async (t) => {
   await t.test("should send browser_session message when cdpUrl is available", async () => {
     const wsManager = createMockWsManager();
@@ -150,6 +159,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -189,6 +199,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -201,7 +212,7 @@ test("CloudRunService handleCloudRun", async (t) => {
     assert.equal(browserSessionMsg, undefined, "browser_session message should not be sent");
   });
 
-  await t.test("should send session_started message before browser_session", async () => {
+  await t.test("should send run_status(started) message before browser_session", async () => {
     const wsManager = createMockWsManager();
     const cloudManager = createMockCloudManager({
       result: {
@@ -218,6 +229,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -225,14 +237,14 @@ test("CloudRunService handleCloudRun", async (t) => {
     await service.handleCloudRun("conn-1", createMockConnection(), message);
 
     const sentMessages = wsManager._getSentMessages();
-    const sessionStartedIndex = sentMessages.findIndex((m) => m.message.type === "session_started");
+    const sessionStartedIndex = sentMessages.findIndex((m) => m.message.type === "run_status");
     const browserSessionIndex = sentMessages.findIndex((m) => m.message.type === "browser_session");
 
-    assert.ok(sessionStartedIndex >= 0, "session_started message should be sent");
+    assert.ok(sessionStartedIndex >= 0, "run_status(started) message should be sent");
     assert.ok(browserSessionIndex >= 0, "browser_session message should be sent");
     assert.ok(
       sessionStartedIndex < browserSessionIndex,
-      "session_started should come before browser_session",
+      "run_status(started) should come before browser_session",
     );
   });
 
@@ -254,6 +266,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -290,6 +303,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -319,6 +333,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "",
       repoIds: [],
     };
@@ -351,6 +366,7 @@ test("CloudRunService handleCloudRun", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Test prompt",
       repoIds: [],
     };
@@ -413,6 +429,7 @@ test("CloudRunService auto-restore", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Continue work",
       repoIds: [],
       autoRestore: true,
@@ -441,6 +458,7 @@ test("CloudRunService auto-restore", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Fresh start",
       repoIds: [],
       autoRestore: false,
@@ -469,6 +487,7 @@ test("CloudRunService auto-restore", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Restore specific",
       repoIds: [],
       restoreSnapshotId: "snap-explicit-999",
@@ -498,6 +517,7 @@ test("CloudRunService auto-restore", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Auto restore",
       repoIds: [],
       autoRestore: true,
@@ -511,8 +531,8 @@ test("CloudRunService auto-restore", async (t) => {
 
     // Should still start session successfully
     const sentMessages = wsManager._getSentMessages();
-    const sessionStartedMsg = sentMessages.find((m) => m.message.type === "session_started");
-    assert.ok(sessionStartedMsg, "session_started message should be sent");
+    const sessionStartedMsg = sentMessages.find((m) => m.message.type === "run_status");
+    assert.ok(sessionStartedMsg, "run_status(started) message should be sent");
   });
 
   await t.test("should not call detectLatestSnapshot when autoRestore is undefined", async () => {
@@ -531,6 +551,7 @@ test("CloudRunService auto-restore", async (t) => {
 
     const message: CloudRunMessage = {
       type: "cloud_run",
+      chatId: baseChatId,
       prompt: "Normal run",
       repoIds: [],
       // autoRestore not specified (undefined)

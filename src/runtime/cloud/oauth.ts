@@ -3,14 +3,7 @@ import type { CloudOAuthProviderSection, CloudSection } from "../config.js";
 import type { Db } from "../db.js";
 import { createOAuthState, consumeOAuthState, markIdentityOnboarded, upsertConnection, setGithubMcpToken } from "./store.js";
 import { encryptSecret } from "./secrets.js";
-
-function base64Url(input: Buffer): string {
-  return input
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
+import { base64Url } from "./proxy.js";
 
 export function generateCodeVerifier(): string {
   return base64Url(crypto.randomBytes(32));
@@ -74,8 +67,29 @@ async function exchangeToken(opts: {
   };
 }
 
+/**
+ * Derive OAuth provider config from GitHub App credentials.
+ * Used when cloud.oauth.github is not explicitly configured.
+ */
+function deriveGithubAppOAuthConfig(cloud: CloudSection): CloudOAuthProviderSection {
+  const cfg = cloud.github_app;
+  if (!cfg?.client_id || !cfg?.client_secret) {
+    throw new Error("GitHub App OAuth credentials (client_id/client_secret) not configured");
+  }
+  const base = cfg.app_base_url.replace(/\/+$/, "");
+  return {
+    client_id: cfg.client_id,
+    client_secret: cfg.client_secret,
+    authorize_url: `${base}/login/oauth/authorize`,
+    token_url: `${base}/login/oauth/access_token`,
+    api_base_url: cfg.api_base_url,
+    scopes: [],
+  };
+}
+
 function resolveProviderConfig(cloud: CloudSection, provider: string): CloudOAuthProviderSection {
   if (provider === "github" && cloud.oauth.github) return cloud.oauth.github;
+  if (provider === "github" && cloud.github_app?.client_id) return deriveGithubAppOAuthConfig(cloud);
   if (provider === "gitlab" && cloud.oauth.gitlab) return cloud.oauth.gitlab;
   if (provider === "local" && cloud.oauth.local) return cloud.oauth.local;
   throw new Error(`OAuth provider not configured: ${provider}`);

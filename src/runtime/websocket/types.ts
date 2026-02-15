@@ -14,37 +14,13 @@ export interface PingMessage {
   type: 'ping';
 }
 
-export interface GetConnectionsMessage {
-  type: 'get_connections';
-}
-
-export interface ListReposMessage {
-  type: 'list_repos';
-  provider?: string;  // 'github' | 'gitlab'
-  search?: string;
-}
-
-export interface GetAuthStatusMessage {
-  type: 'get_auth_status';
-  provider: 'github' | 'gitlab';
-}
-
-export interface StartOAuthMessage {
-  type: 'start_oauth';
-  provider: 'github' | 'gitlab';
-}
-
-export interface GitHubDisconnectMessage {
-  type: 'github_disconnect';
-  action: 'preview' | 'confirm';
-  token?: string;  // Required when action is 'confirm'
-}
-
 // ============ Cloud Run Messages (Client → Server) ============
 
 export interface CloudRunMessage {
   type: 'cloud_run';
-  repoIds?: string[];              // repo IDs (empty array = playground mode)
+  chatId: string;                // stable conversation id from website
+  projectId?: string;              // project ID (preferred over repoIds)
+  repoIds?: string[];              // repo IDs (deprecated, use projectId)
   prompt: string;                  // user prompt
   agent?: 'codex' | 'claude_code'; // optional, defaults from config
   language?: string;               // optional, language code (e.g., 'en', 'zh')
@@ -53,51 +29,37 @@ export interface CloudRunMessage {
   lastRunId?: string;              // optional, restore from specific run's snapshot
 }
 
-export interface SubscribeRunMessage {
-  type: 'subscribe_run';
-  runId: string;
+export interface SubscribeChatMessage {
+  type: 'subscribe_chat';
+  chatId: string;
 }
 
 export interface CloudFollowUpMessage {
   type: 'cloud_follow_up';
-  runId: string;
+  chatId: string;
   prompt: string;
 }
 
 export interface CloudStopMessage {
   type: 'cloud_stop';
-  runId: string;
+  chatId: string;
 }
 
 export type ClientMessage =
   | AuthMessage
   | PingMessage
-  | GetConnectionsMessage
-  | ListReposMessage
-  | GetAuthStatusMessage
-  | StartOAuthMessage
-  | GitHubDisconnectMessage
   | CloudRunMessage
-  | SubscribeRunMessage
+  | SubscribeChatMessage
   | CloudFollowUpMessage
   | CloudStopMessage;
 
 // ============ Server → Client Messages ============
 
-export interface AuthOkMessage {
-  type: 'auth_ok';
-  identityId?: string;
-}
-
-export interface AuthErrorMessage {
-  type: 'auth_error';
-  message: string;
-}
-
-export interface SessionStartedMessage {
-  type: 'session_started';
-  sessionId: string;
-  runId?: string;
+export interface AuthResultMessage {
+  type: 'auth_result';
+  success: boolean;
+  identityId?: string;  // when success=true
+  message?: string;     // when success=false
 }
 
 export interface ChunkMessage {
@@ -173,76 +135,13 @@ export interface PongMessage {
   type: 'pong';
 }
 
-export interface ConnectionsListMessage {
-  type: 'connections_list';
-  connections: Array<{
-    id: string;
-    type: string;
-    installationId?: string;
-    accountLogin?: string;
-    status?: string;
-    createdAt: number;
-  }>;
-}
-
-export interface ReposListMessage {
-  type: 'repos_list';
-  repos: Array<{
-    id: string;
-    name: string;
-    url: string;
-    provider: string;
-    defaultBranch: string | null;
-  }>;
-  total: number;
-}
-
-export interface AuthStatusMessage {
-  type: 'auth_status';
-  provider: string;
-  connected: boolean;
-  accountLogin?: string;
-  installationId?: string;
-}
-
-export interface OAuthStartedMessage {
-  type: 'oauth_started';
-  provider: string;
-  authorizeUrl: string;
-}
-
-export interface GitHubDisconnectImpact {
-  repos: number;
-  runs: number;
-  sessions: number;
-  screenshots: number;
-  snapshots: number;
-}
-
-export interface GitHubDisconnectPreviewMessage {
-  type: 'github_disconnect_preview';
-  impact: GitHubDisconnectImpact;
-  confirmToken: string;
-  expiresIn: number;  // ms
-}
-
-export interface GitHubDisconnectResultMessage {
-  type: 'github_disconnect_result';
-  success: true;
-  impact: GitHubDisconnectImpact;
-}
-
-export interface GitHubDisconnectErrorMessage {
-  type: 'github_disconnect_error';
-  error: string;
-}
-
 // ============ Cloud Run Messages (Server → Client) ============
 
 export interface RunStatusMessage {
   type: 'run_status';
   runId: string;
-  status: CloudRunStatus;
+  sessionId?: string;  // present when status='started'
+  status: CloudRunStatus | 'started';
   message?: string;
 }
 
@@ -266,24 +165,16 @@ export interface BrowserSessionMessage {
   provider: BrowserProvider;
 }
 
-export interface FollowUpQueuedMessage {
-  type: 'follow_up_queued';
+export interface FollowUpStatusMessage {
+  type: 'follow_up_status';
   runId: string;
   sessionId: string;
-  position: number;
-}
-
-export interface FollowUpResumingMessage {
-  type: 'follow_up_resuming';
-  runId: string;
-  sessionId: string;
-  status: 'resuming' | 'restarting';
+  status: 'queued' | 'resuming' | 'restarting';
+  position?: number;  // only when status='queued'
 }
 
 export type ServerMessage =
-  | AuthOkMessage
-  | AuthErrorMessage
-  | SessionStartedMessage
+  | AuthResultMessage
   | ChunkMessage
   | ToolCallMessage
   | ToolOutputMessage
@@ -292,21 +183,11 @@ export type ServerMessage =
   | DoneMessage
   | ErrorMessage
   | PongMessage
-  | ConnectionsListMessage
-  | ReposListMessage
-  | AuthStatusMessage
-  | OAuthStartedMessage
-  | GitHubDisconnectPreviewMessage
-  | GitHubDisconnectResultMessage
-  | GitHubDisconnectErrorMessage
   | RunStatusMessage
   | RunLinksMessage
   | BrowserSessionMessage
   | SandboxStatusMessage
-  | SandboxReadyMessage
-  | SandboxErrorMessage
-  | FollowUpQueuedMessage
-  | FollowUpResumingMessage;
+  | FollowUpStatusMessage;
 
 // ============ Error Codes ============
 
@@ -362,17 +243,7 @@ export interface SandboxStatusMessage {
   status: ConnectionSandboxStatus;
   workspaceId?: string;
   message?: string;
-}
-
-export interface SandboxReadyMessage {
-  type: 'sandbox_ready';
-  workspaceId: string;
-}
-
-export interface SandboxErrorMessage {
-  type: 'sandbox_error';
-  message: string;
-  recoverable: boolean;
+  recoverable?: boolean;  // only when status='error'
 }
 
 // ============ Connection State ============

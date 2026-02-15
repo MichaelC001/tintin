@@ -111,14 +111,58 @@ stateDiagram-v2
     end note
 ```
 
-## WebSocket Real-time Flow
+## GitHub HTTP REST Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant HTTP as HTTP Server
+    participant GHR as githubRoutes
+    participant CR as cloud/repos
+    participant OA as cloud/oauth
+    participant GA as cloud/githubApp
+    participant DB as Database
+    participant GH as GitHub API
+
+    Note over C, GH: All GitHub operations use HTTP REST (not WebSocket)
+
+    C->>HTTP: GET /api/github/auth-status
+    HTTP->>GHR: verifyProxyToken()
+    GHR->>DB: Query connections
+    GHR-->>C: {"connected": true, "login": "user"}
+
+    C->>HTTP: GET /api/github/repos?search=foo
+    HTTP->>GHR: verifyProxyToken()
+    GHR->>CR: syncReposForIdentity()
+    CR->>GH: Fetch repos (paginated)
+    CR->>DB: Upsert repos
+    GHR-->>C: {"repos": [...], "stale": false}
+
+    C->>HTTP: POST /api/github/oauth/start
+    HTTP->>GHR: verifyProxyToken()
+    GHR->>OA: generateState()
+    GHR-->>C: {"authUrl": "https://github.com/login/oauth/..."}
+
+    C->>HTTP: POST /api/github/disconnect {"confirm": false}
+    HTTP->>GHR: verifyProxyToken()
+    GHR->>DB: Compute impact (repos, runs, sessions)
+    GHR-->>C: {"impact": {...}, "confirmToken": "abc123"}
+
+    C->>HTTP: POST /api/github/disconnect {"confirm": true, "token": "abc123"}
+    GHR->>DB: Delete connections & repos
+    GHR-->>C: {"success": true}
+```
+
+## WebSocket Agent Execution Flow
 
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant S as Server
     participant H as Handler
-    participant SM as SessionManager
+    participant CRS as CloudRunService
+    participant CM as CloudManager
+    participant CP as CloudProvider
     participant A as Agent
 
     C->>S: WS Connect + Token
@@ -127,37 +171,10 @@ sequenceDiagram
     alt Auth Failed
         S-->>C: Connection Rejected
     else Auth Success
-        S-->>C: Connection Accepted
+        S-->>C: {"type": "auth_result", "success": true}
     end
 
-    C->>S: {"type": "chat", "content": "Hello"}
-    S->>H: handleMessage()
-    H->>SM: Create/Resume session
-    SM->>A: Send prompt
-
-    loop Agent Processing
-        A->>SM: JSONL event
-        SM->>H: StreamFragment
-        H-->>C: {"type": "fragment", "text": "..."}
-    end
-
-    A->>SM: Done
-    H-->>C: {"type": "done"}
-```
-
-## WebSocket Cloud Run Flow
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant S as Server
-    participant CRS as CloudRunService
-    participant CM as CloudManager
-    participant CP as CloudProvider
-    participant A as Agent
-
-    C->>S: {"type": "auth"}
-    S-->>C: {"type": "auth_ok"}
+    Note over C, A: WebSocket handles only agent execution messages
 
     C->>S: {"type": "cloud_run", "repoIds": [...], "prompt": "..."}
     S->>CRS: handleCloudRun()
@@ -167,7 +184,7 @@ sequenceDiagram
     CM->>A: Start agent
 
     CRS-->>C: {"type": "run_status", "status": "starting"}
-    CRS-->>C: {"type": "session_started", "sessionId": "..."}
+    CRS-->>C: {"type": "sandbox_status", "ready": true}
 
     loop Agent Processing
         A->>CM: JSONL event
@@ -180,6 +197,10 @@ sequenceDiagram
 
     A->>CM: Done
     CRS-->>C: {"type": "done", "exitCode": 0}
+
+    Note over C, S: Follow-up and stop
+    C->>S: {"type": "cloud_follow_up", "content": "..."}
+    C->>S: {"type": "cloud_stop"}
 ```
 
 ## MCP Server Lifecycle
@@ -274,6 +295,8 @@ sequenceDiagram
 
 ## OAuth Flow (GitHub/Slack/Notion)
 
+### Platform OAuth (Telegram/Slack)
+
 ```mermaid
 sequenceDiagram
     participant U as User
@@ -299,6 +322,97 @@ sequenceDiagram
 
     O-->>U: Success message
     O-->>P: Connection established
+```
+
+### HTTP OAuth (WebSocket/Cloud UI)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant GHR as githubRoutes
+    participant O as OAuth Handler
+    participant DB as Database
+    participant GH as GitHub
+
+    C->>GHR: POST /api/github/oauth/start
+    GHR->>O: generateState(source: "http")
+    O->>DB: Store state + identityId
+    GHR-->>C: {"authUrl": "https://github.com/..."}
+
+    C->>GH: User authorizes in browser
+    GH->>GHR: Callback with code
+    GHR->>O: Verify state
+    O->>GH: Exchange code for token
+    GH-->>O: Access token
+    O->>DB: Store connection + MCP token
+    O-->>C: Redirect to success page
+```
+
+### GitHub App → OAuth Chaining
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant GH as GitHub
+    participant S as HTTP Server
+    participant GA as githubApp
+    participant O as OAuth Handler
+    participant DB as Database
+
+    U->>GH: Install GitHub App
+    GH->>S: App callback (installation_id)
+    S->>GA: handleInstallation()
+    GA->>DB: Store App connection
+
+    Note over S, O: Chain OAuth for MCP token
+    S->>O: generateState(chain: true)
+    S-->>U: Redirect to GitHub OAuth
+    U->>GH: Authorize OAuth
+    GH->>S: OAuth callback
+    S->>O: Exchange code for token
+    O->>DB: Store OAuth connection + MCP token
+    O-->>U: Setup complete
+```
+
+## WebSocket Tool Call/Output Streaming Flow
+
+```mermaid
+sequenceDiagram
+    participant CLI as Agent CLI
+    participant JL as JSONL File
+    participant JS as JsonlStreamer
+    participant EM as EventMappers
+    participant MSG as SessionMessenger
+    participant WS as WebSocket
+    participant P as Platform (TG/Slack)
+
+    CLI->>JL: Write tool_use event
+    JS->>JL: pollOnce() - read new lines
+    JL-->>JS: JSONL events
+
+    JS->>EM: mapToFragment()
+    EM-->>JS: StreamFragment (tool_call)
+
+    JS->>MSG: sendToSession()
+
+    alt Has WebSocket subscribers
+        MSG->>WS: {"type": "tool_call", "name": "Bash", ...}
+    end
+
+    MSG->>P: Format as text for TG/Slack
+
+    CLI->>JL: Write tool_result event
+    JS->>JL: pollOnce()
+    JS->>EM: mapToFragment()
+    EM-->>JS: StreamFragment (tool_output)
+
+    JS->>MSG: sendToSession()
+
+    alt Has WebSocket subscribers
+        MSG->>WS: {"type": "tool_output", "content": "..."}
+    end
+
+    MSG->>P: Format as text for TG/Slack
 ```
 
 ## Message Verbosity Levels

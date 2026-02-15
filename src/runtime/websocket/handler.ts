@@ -8,7 +8,7 @@ import type { ClientMessage, WebSocketSection } from './types.js';
 import { ErrorCodes } from './types.js';
 import { verifyProxyToken } from '../cloud/proxy.js';
 import { requireAuth } from './guards.js';
-import { GitHubService, GitHubDisconnectService, CloudRunService, SandboxLifecycleService } from './services/index.js';
+import { CloudRunService, SandboxLifecycleService } from './services/index.js';
 
 export interface PreviewUrlEvent {
   sessionId: string;
@@ -18,8 +18,6 @@ export interface PreviewUrlEvent {
 }
 
 export class WebSocketHandler {
-  private readonly githubService: GitHubService;
-  private readonly githubDisconnectService: GitHubDisconnectService;
   private readonly cloudRunService: CloudRunService | null;
   readonly sandboxLifecycleService: SandboxLifecycleService | null;
 
@@ -36,21 +34,6 @@ export class WebSocketHandler {
     private readonly logger: Logger,
     cloudManager: CloudManager | null = null,
   ) {
-    this.githubService = new GitHubService(
-      wsManager,
-      config,
-      db,
-      logger,
-    );
-
-    this.githubDisconnectService = new GitHubDisconnectService(
-      wsManager,
-      config,
-      db,
-      logger,
-      cloudManager,
-    );
-
     // Initialize sandbox lifecycle service if cloud is enabled
     this.sandboxLifecycleService = cloudManager
       ? new SandboxLifecycleService(wsManager, cloudManager, db, logger)
@@ -94,44 +77,6 @@ export class WebSocketHandler {
         // Already handled in manager
         break;
 
-      case 'get_connections': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleGetConnections(connId, auth.identityId);
-        break;
-      }
-
-      case 'list_repos': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleListRepos(connId, auth.identityId, {
-          provider: message.provider,
-          search: message.search,
-        });
-        break;
-      }
-
-      case 'get_auth_status': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleGetAuthStatus(connId, auth.identityId, message.provider);
-        break;
-      }
-
-      case 'start_oauth': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubService.handleStartOAuth(connId, auth.identityId, message.provider);
-        break;
-      }
-
-      case 'github_disconnect': {
-        const auth = requireAuth(this.wsManager, connId);
-        if (!auth) return;
-        await this.githubDisconnectService.handleGitHubDisconnect(connId, auth.identityId, message);
-        break;
-      }
-
       case 'cloud_run': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
@@ -147,7 +92,7 @@ export class WebSocketHandler {
         break;
       }
 
-      case 'subscribe_run': {
+      case 'subscribe_chat': {
         const auth = requireAuth(this.wsManager, connId);
         if (!auth) return;
         if (!this.cloudRunService) {
@@ -158,15 +103,15 @@ export class WebSocketHandler {
           });
           return;
         }
-        if (!message.runId) {
+        if (!message.chatId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            message: 'Chat ID required',
           });
           return;
         }
-        await this.cloudRunService.handleSubscribeRun(connId, message.runId);
+        await this.cloudRunService.handleSubscribeChat(connId, auth.conn, message.chatId);
         break;
       }
 
@@ -196,15 +141,15 @@ export class WebSocketHandler {
           });
           return;
         }
-        if (!message.runId) {
+        if (!message.chatId) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
             code: ErrorCodes.INVALID_MESSAGE,
-            message: 'Run ID required',
+            message: 'Chat ID required',
           });
           return;
         }
-        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.runId);
+        await this.cloudRunService.handleCloudStop(connId, auth.conn, message.chatId);
         break;
       }
 
@@ -237,7 +182,8 @@ export class WebSocketHandler {
       }
 
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_ok',
+        type: 'auth_result',
+        success: true,
         identityId,
       });
       this.logger.debug(`[ws] auth ok (no-auth mode) id=${connId} identity=${identityId}`);
@@ -252,7 +198,8 @@ export class WebSocketHandler {
     // Phase 2: Token verification (when auth_enabled = true)
     if (!token) {
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Token required',
       });
       this.wsManager.closeConnection(connId, 4001, 'Token required');
@@ -264,7 +211,8 @@ export class WebSocketHandler {
     if (!secret) {
       this.logger.warn(`[ws] auth failed id=${connId}: shared_secret not configured`);
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Auth not configured',
       });
       this.wsManager.closeConnection(connId, 4001, 'Auth not configured');
@@ -275,7 +223,8 @@ export class WebSocketHandler {
     if (!verified) {
       this.logger.warn(`[ws] auth failed id=${connId}: invalid token`);
       this.wsManager.sendToConnection(connId, {
-        type: 'auth_error',
+        type: 'auth_result',
+        success: false,
         message: 'Invalid token',
       });
       this.wsManager.closeConnection(connId, 4001, 'Invalid token');
@@ -293,7 +242,8 @@ export class WebSocketHandler {
     }
 
     this.wsManager.sendToConnection(connId, {
-      type: 'auth_ok',
+      type: 'auth_result',
+      success: true,
       identityId: verified.identityId,
     });
     this.logger.debug(`[ws] auth ok id=${connId} identity=${verified.identityId}`);

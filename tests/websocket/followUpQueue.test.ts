@@ -74,6 +74,7 @@ function createFollowUpDb(sessionStatus: string) {
     selectAll: () => createChainableMock(table),
     select: () => createChainableMock(table),
     where: () => createChainableMock(table),
+    orderBy: () => createChainableMock(table),
     executeTakeFirst: async () => {
       if (table === "cloud_runs") return cloudRun;
       if (table === "sessions") return session;
@@ -110,10 +111,16 @@ function createMockConnection(connId = "conn-1"): WSConnection {
 function createMockConfig(): AppConfig {
   return {
     cloud: { default_agent: "codex", ui_base_url: "https://example.com" },
+    security: {
+      max_sessions_per_identity: 1000,
+      max_concurrent_sessions_per_identity: 100,
+    },
   } as unknown as AppConfig;
 }
 
 // ============ Tests ============
+
+const baseChatId = "chat-123";
 
 test("FollowUpQueue - FIFO order", async (t) => {
   await t.test("should process queued follow-ups in FIFO order", async () => {
@@ -138,17 +145,18 @@ test("FollowUpQueue - FIFO order", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "cloud_runs") {
               return { id: "run-123", identity_id: "db-identity-123", session_id: "session-456", status: "finished", provider: "modal", workspace_id: "ws-1" };
             }
             if (t === "sessions") {
               callCount++;
-              // First 2 calls from handleCloudFollowUp -> running (queue it)
-              // 3rd call from processQueuedFollowUps -> finished (resume it)
+              // Each handleCloudFollowUp uses 2 session queries (getLatestSessionForChatId + status check)
+              // 2 calls × 2 queries = 4 queries during queuing, then finished for processQueuedFollowUps
               return {
                 id: "session-456",
-                status: callCount <= 2 ? "running" : "finished",
+                status: callCount <= 4 ? "running" : "finished",
                 agent: "codex", codex_session_id: "csid-1", codex_cwd: "/workspace", project_id: "cloud:test",
               };
             }
@@ -173,20 +181,20 @@ test("FollowUpQueue - FIFO order", async (t) => {
 
     // Queue two follow-ups
     await service.handleCloudFollowUp("conn-1", conn1, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "First prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "First prompt",
     });
     await service.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Second prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Second prompt",
     });
 
     // Verify both are queued
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.filter((m) => m.message.type === "follow_up_queued");
+    const queued = msgs.filter((m) => m.message.type === "follow_up_status");
     assert.equal(queued.length, 2);
-    if (queued[0]?.message.type === "follow_up_queued") {
+    if (queued[0]?.message.type === "follow_up_status") {
       assert.equal(queued[0].message.position, 1);
     }
-    if (queued[1]?.message.type === "follow_up_queued") {
+    if (queued[1]?.message.type === "follow_up_status") {
       assert.equal(queued[1].message.position, 2);
     }
 
@@ -212,21 +220,21 @@ test("FollowUpQueue - queue position", async (t) => {
     const conn = createMockConnection();
 
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt A",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt A",
     });
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt B",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt B",
     });
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Prompt C",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Prompt C",
     });
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.filter((m) => m.message.type === "follow_up_queued");
+    const queued = msgs.filter((m) => m.message.type === "follow_up_status");
     assert.equal(queued.length, 3);
 
     const positions = queued.map((m) =>
-      m.message.type === "follow_up_queued" ? m.message.position : -1,
+      m.message.type === "follow_up_status" ? m.message.position : -1,
     );
     assert.deepEqual(positions, [1, 2, 3]);
   });
@@ -248,10 +256,10 @@ test("FollowUpQueue - connection cleanup", async (t) => {
     const conn2 = createMockConnection("conn-2");
 
     await service.handleCloudFollowUp("conn-1", conn1, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-1",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-1",
     });
     await service.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-2",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-2",
     });
 
     // Disconnect conn-1
@@ -271,6 +279,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "sessions") {
               return {
@@ -301,7 +310,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
 
     // Re-queue just conn-2's entry
     await service2.handleCloudFollowUp("conn-2", conn2, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "From conn-2 only",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "From conn-2 only",
     });
     // Override the DB to return finished
     wsManager._clearMessages();
@@ -325,14 +334,15 @@ test("FollowUpQueue - connection cleanup", async (t) => {
           selectAll: () => createChain(t),
           select: () => createChain(t),
           where: () => createChain(t),
+          orderBy: () => createChain(t),
           executeTakeFirst: async () => {
             if (t === "cloud_runs") {
               return { id: "run-123", identity_id: "db-identity-123", session_id: "session-456", status: "finished", provider: "modal", workspace_id: "ws-1" };
             }
             if (t === "sessions") {
               sessionCallCount++;
-              // handleCloudFollowUp calls: return running
-              if (sessionCallCount <= 1) {
+              // handleCloudFollowUp uses 2 session queries (getLatestSessionForChatId + status check)
+              if (sessionCallCount <= 2) {
                 return { id: "session-456", status: "running", agent: "codex", codex_session_id: "csid-1", codex_cwd: "/workspace", project_id: "cloud:test" };
               }
               // processQueuedFollowUps calls: return finished
@@ -359,7 +369,7 @@ test("FollowUpQueue - connection cleanup", async (t) => {
 
     const conn = createMockConnection("conn-1");
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Queued prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Queued prompt",
     });
 
     // conn-1 is NOT registered in wsManager.getConnection, so it appears disconnected
@@ -387,7 +397,7 @@ test("FollowUpQueue - queue size limit", async (t) => {
     // Queue 50 items (MAX_QUEUE_SIZE)
     for (let i = 0; i < 50; i++) {
       await service.handleCloudFollowUp("conn-1", conn, {
-        type: "cloud_follow_up", runId: "run-123", prompt: `Prompt ${i}`,
+        type: "cloud_follow_up", chatId: baseChatId, prompt: `Prompt ${i}`,
       });
     }
 
@@ -395,7 +405,7 @@ test("FollowUpQueue - queue size limit", async (t) => {
 
     // The 51st should fail
     await service.handleCloudFollowUp("conn-1", conn, {
-      type: "cloud_follow_up", runId: "run-123", prompt: "Overflow prompt",
+      type: "cloud_follow_up", chatId: baseChatId, prompt: "Overflow prompt",
     });
 
     const msgs = wsManager._getSentMessages();

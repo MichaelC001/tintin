@@ -9,7 +9,7 @@ import type { CloudSection } from "../config.js";
 import type { Db } from "../db.js";
 import type { Logger } from "../log.js";
 import type { CloudManager } from "./manager.js";
-import type { GitHubDisconnectImpact } from "../websocket/types.js";
+import type { GitHubDisconnectImpact } from "./types.js";
 import {
   loadDisconnectScope,
   computeImpactFromScope,
@@ -31,68 +31,50 @@ export async function findGithubOAuthConnection(db: Db, identityId: string) {
 }
 
 /**
- * Find any GitHub connection (github_app or github_oauth) for an identity.
- * Prefers github_oauth if both exist (OAuth has user tokens to delete).
+ * Find all GitHub connections (github_app and github_oauth) for an identity.
  */
-export async function findAnyGithubConnection(db: Db, identityId: string) {
-  const connections = await db
+export async function findAllGithubConnections(db: Db, identityId: string) {
+  return await db
     .selectFrom("connections")
     .selectAll()
     .where("identity_id", "=", identityId)
     .where("type", "in", ["github_app", "github_oauth"])
     .execute();
-
-  // Prefer github_oauth if both exist
-  return connections.find(c => c.type === 'github_oauth') ?? connections[0] ?? null;
 }
 
 /**
- * Compute the impact of disconnecting a GitHub OAuth connection.
+ * Compute the impact of disconnecting GitHub connections.
  */
-export async function computeOAuthDisconnectImpact(db: Db, connectionId: string): Promise<GitHubDisconnectImpact> {
-  const scope = await loadDisconnectScope(db, [connectionId]);
+export async function computeGithubDisconnectImpact(db: Db, connectionIds: string[]): Promise<GitHubDisconnectImpact> {
+  const scope = await loadDisconnectScope(db, connectionIds);
   return computeImpactFromScope(scope);
 }
 
 /**
- * Execute GitHub OAuth/App disconnect - cleans up all related data.
- * Supports both github_oauth and github_app connection types.
+ * Execute GitHub disconnect — cleans up all related data for all GitHub connections.
  */
-export async function executeOAuthDisconnect(opts: {
+export async function executeGithubDisconnect(opts: {
   db: Db;
   cloud: CloudSection;
   logger: Logger;
-  connectionId: string;
+  connectionIds: string[];
   identityId: string;
   cloudManager: CloudManager | null;
 }): Promise<GitHubDisconnectImpact> {
-  const scope = await loadDisconnectScope(opts.db, [opts.connectionId]);
+  const scope = await loadDisconnectScope(opts.db, opts.connectionIds);
   const impact = computeImpactFromScope(scope);
 
   await stopRunningSandboxes(opts.db, scope, opts.cloudManager, opts.logger);
 
-  // Fetch connection to determine type
-  const connection = await opts.db
-    .selectFrom("connections")
-    .selectAll()
-    .where("id", "=", opts.connectionId)
-    .executeTakeFirst();
-
-  const connectionType = connection?.type ?? "github_oauth";
-  const isOAuth = connectionType === "github_oauth";
-
   await opts.db.transaction().execute(async (trx) => {
-    // OAuth-specific: delete github_mcp_tokens (only for OAuth connections)
-    if (isOAuth) {
-      await trx.deleteFrom("github_mcp_tokens").where("identity_id", "=", opts.identityId).execute();
-    }
+    // Always clean github_mcp_tokens
+    await trx.deleteFrom("github_mcp_tokens").where("identity_id", "=", opts.identityId).execute();
 
     await executeCleanupTransaction(trx, scope, {
       identityId: opts.identityId,
-      auditKind: isOAuth ? "github_oauth_disconnect" : "github_app_disconnect",
+      auditKind: "github_disconnect",
       auditPayload: {
-        connection_id: opts.connectionId,
-        connection_type: connectionType,
+        connection_ids: opts.connectionIds,
         repo_count: scope.repoIds.length,
         run_count: scope.runIds.length,
       },
@@ -103,7 +85,7 @@ export async function executeOAuthDisconnect(opts: {
   await cleanupExternalFiles(scope, opts.cloud.ui, opts.logger);
 
   opts.logger.info(
-    `[${isOAuth ? "github_oauth" : "github_app"}_disconnect] completed identity=${opts.identityId} repos=${impact.repos} runs=${impact.runs}`,
+    `[github_disconnect] completed identity=${opts.identityId} connections=${opts.connectionIds.length} repos=${impact.repos} runs=${impact.runs}`,
   );
 
   return impact;

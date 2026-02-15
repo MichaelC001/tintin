@@ -4,12 +4,11 @@ Detailed documentation of all modules with LOC, responsibilities, and key export
 
 ## Core Modules (`src/runtime/`)
 
-### service.ts (563 LOC)
+### service.ts (526 LOC)
 HTTP server & bot initialization
 
 **Responsibilities:**
 - Express server setup
-- OAuth callbacks (GitHub, Slack, Notion)
 - Bot webhook endpoints
 - UI static file serving
 
@@ -37,7 +36,7 @@ class BotController {
 }
 ```
 
-### sessionManager.ts (1084 LOC)
+### sessionManager.ts (1174 LOC)
 Agent session lifecycle management
 
 **Responsibilities:**
@@ -92,7 +91,7 @@ Claude Code CLI adapter
 - JSONL stdout parsing
 - Process lifecycle
 
-### config.ts (1027 LOC)
+### config.ts (1043 LOC)
 TOML configuration loader
 
 **Responsibilities:**
@@ -106,7 +105,7 @@ function load(path: string): Promise<Config>
 function expandEnv(value: string): string
 ```
 
-### db.ts (536 LOC)
+### db.ts (567 LOC)
 Database types & connection
 
 **Responsibilities:**
@@ -119,13 +118,19 @@ function createConnection(config): Promise<Kysely<Database>>
 interface Database { ... }
 ```
 
-### store.ts (345 LOC)
+### store.ts (366 LOC)
 Data access layer
 
 **Responsibilities:**
 - Session CRUD
 - Identity queries
 - Connection management
+- WebSocket identity resolution
+
+**Key Exports:**
+```typescript
+function resolveWebIdentityId(db, wsIdentityId): Promise<string>
+```
 
 ### messaging.ts
 Platform message sending abstraction
@@ -182,7 +187,7 @@ Slack-specific handling
 - Shortcut handling
 - Modal interactions
 
-### cloudHandler.ts (1536 LOC)
+### cloudHandler.ts (1671 LOC)
 Cloud command handling
 
 **Responsibilities:**
@@ -199,7 +204,7 @@ Shared interaction handling
 - Selection handling
 - Response routing
 
-### commands.ts (497 LOC)
+### commands.ts (529 LOC)
 Command parsing utilities
 
 **Key Exports:**
@@ -208,7 +213,7 @@ function parseCommand(text): ParsedCommand | null
 function parseArgs(args): ParsedArgs
 ```
 
-### sessions.ts (265 LOC)
+### sessions.ts (276 LOC)
 Session management commands
 
 **Key Exports:**
@@ -268,7 +273,7 @@ const env = EnvironmentBuilder.create()
 
 ## Streamer Modules (`src/runtime/streamer/`)
 
-### JsonlStreamer.ts (843 LOC)
+### JsonlStreamer.ts (840 LOC)
 Main streaming logic
 
 **Responsibilities:**
@@ -286,7 +291,7 @@ class JsonlStreamer {
 }
 ```
 
-### ToolCallManager.ts
+### ToolCallManager.ts (77 LOC)
 Tool call/output pairing queue
 
 **Key Exports:**
@@ -297,15 +302,24 @@ class ToolCallManager {
 }
 ```
 
-### PlanUpdateHandler.ts
+### PlanUpdateHandler.ts (180 LOC)
 Plan update parsing
 
 ### PlaywrightScreenshotManager.ts (456 LOC)
 Browser screenshots via MCP
 
+### eventMappers/ (1190 LOC total)
+Agent-specific event mapping
+
+**Files:**
+- `claudeMapper.ts` (183 LOC) - Claude Code JSONL event → StreamFragment
+- `codexMapper.ts` (275 LOC) - Codex JSONL event → StreamFragment
+- `helpers.ts` (428 LOC) - Shared mapping utilities, text formatting, tool output formatting
+- `messageDispatcher.ts` (304 LOC) - Routes fragments to platform/WebSocket destinations
+
 ## Cloud Execution (`src/runtime/cloud/`)
 
-### manager.ts (4533 LOC)
+### manager.ts (4699 LOC)
 Cloud run orchestration
 
 **Responsibilities:**
@@ -336,16 +350,39 @@ class ModalProvider implements CloudProvider {
 }
 ```
 
-### localProvider.ts (4932 LOC)
+### localProvider.ts (124 LOC)
 Local provider for testing
 
-### store.ts (1390 LOC)
+### store.ts (1508 LOC)
 Cloud data access layer
 
-### githubApp.ts (307 LOC)
+### repos.ts (152 LOC)
+Centralized repository sync logic
+
+**Responsibilities:**
+- Fetch GitHub personal repos (paginated)
+- Fetch GitHub App installation repos
+- Sync all repos for an identity with stale indicator
+- Fetch GitLab repos
+
+**Key Exports:**
+```typescript
+function syncReposForIdentity(db, identityId, connections): Promise<{ stale: boolean }>
+function fetchGithubRepos(token): Promise<Repo[]>
+function fetchGithubInstallationRepos(installationId): Promise<Repo[]>
+function fetchGitlabRepos(token): Promise<Repo[]>
+```
+
+### githubApp.ts (375 LOC)
 GitHub App integration
 
-### githubWebhook.ts (563 LOC)
+**Key Exports:**
+```typescript
+function parseGithubAppMetadata(metadata): { installation_id, account_login, account_type }
+function isGithubInstallationMissing(installationId): Promise<boolean>
+```
+
+### githubWebhook.ts (572 LOC)
 GitHub webhook processing
 
 ### notion/ (NEW)
@@ -357,28 +394,97 @@ Notion MCP OAuth integration
 - `registration.ts` - Server registration
 - `token.ts` - Token management
 
+## HTTP Service (`src/runtime/service/`)
+
+### httpServer.ts (593 LOC)
+HTTP server setup & route mounting
+
+**Responsibilities:**
+- Express server configuration
+- Route registration
+- Middleware setup
+- Static file serving
+
+### sessionMessenger.ts (752 LOC)
+Platform message formatting & WebSocket routing
+
+**Responsibilities:**
+- Format StreamFragment for platform delivery (Telegram/Slack/WebSocket)
+- Route tool_call and tool_output messages to WebSocket subscribers
+- Verbosity-based message filtering
+- Platform-specific message adaptation
+
+**Key Exports:**
+```typescript
+class SessionMessenger {
+    sendToSession(sessionId, fragment): Promise<void>
+    hasSubscribers(sessionId): boolean
+}
+```
+
+## HTTP API (`src/runtime/service/http/`)
+
+### githubRoutes.ts (487 LOC)
+GitHub HTTP REST API endpoints
+
+**Responsibilities:**
+- GitHub auth status check
+- Repository listing with search/filter
+- GitHub OAuth initiation (OAuth + App flows)
+- Two-phase GitHub disconnect with confirmation
+- Connection listing
+
+**Endpoints:**
+- `GET /api/github/auth-status` - Connection status and account login
+- `GET /api/github/repos` - List repos with search and provider filter
+- `POST /api/github/oauth/start` - Initiate GitHub OAuth or App flow
+- `POST /api/github/disconnect` - Two-step disconnect (preview/confirm)
+- `GET /api/github/connections` - List all OAuth/App connections
+
+**Authentication:** Bearer token via `cloud.proxy.shared_secret`
+
+### agentRoutes.ts (888 LOC)
+Agent log relay & execution API endpoints
+
+**Responsibilities:**
+- Agent log relay from JSONL to HTTP streaming
+- Cloud run execution API
+- Session event broadcasting
+
+### cloudApiRoutes.ts (440 LOC)
+Cloud API endpoints
+
+**Responsibilities:**
+- Cloud run management API
+- Workspace status queries
+- Deployment management
+
 ## WebSocket Communication (`src/runtime/websocket/`)
 
-### manager.ts (412 LOC)
+### manager.ts (400 LOC)
 Connection management
 
-### handler.ts (306 LOC)
-Message routing & authentication
+### handler.ts (256 LOC)
+Agent execution message routing & authentication
 
 **Message Types:**
 - `auth` - Authentication
-- `chat` - Chat message
 - `cloud_run` - Start cloud run
-- `subscribe_run` - Subscribe to run updates
+- `subscribe_chat` - Subscribe to chat updates
+- `cloud_follow_up` - Follow-up prompts
+- `cloud_stop` - Stop execution
 
-### services/cloud.ts (714 LOC)
+### services/cloud.ts (827 LOC)
 CloudRunService
-
-### services/github.ts (342 LOC)
-GitHubService
 
 ### services/identity.ts
 IdentityResolver
+
+### services/linkBuilder.ts
+URL builder for run links
+
+### services/sandboxLifecycle.ts (216 LOC)
+Sandbox provisioning
 
 ## MCP Integration (`src/runtime/mcp/`)
 
@@ -398,11 +504,23 @@ class McpRegistry {
 ### factory.ts
 Provider factory
 
+### activation.ts (136 LOC)
+MCP server activation logic
+
+### config.ts (208 LOC)
+MCP configuration parsing
+
+### schemas.ts (122 LOC)
+JSON schemas for MCP tool validation
+
 ### providers/
+- `base.ts` - Base provider class
 - `stdio.ts` - Stdio transport
 - `http.ts` - HTTP transport
 - `github.ts` - GitHub MCP
-- `playwright/` - Playwright MCP
+- `exa.ts` - Exa search API integration
+- `parallel.ts` - Parallel execution provider
+- `playwright/` - Playwright browser automation MCP
 
 ## Platform Adapters (`src/runtime/platform/`)
 

@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { sql } from "kysely";
-import type { Db, CloudRunStatus } from "../db.js";
+import type { Db, CloudRunStatus, ProjectType } from "../db.js";
 import { encryptSecret } from "./secrets.js";
 import { nowMs } from "../util.js";
 
@@ -9,7 +9,7 @@ export interface IdentityRow {
   platform: string;
   workspace_id: string | null;
   user_id: string;
-  active_repo_id: string | null;
+  active_project_id: string | null;
   onboarded_at: number | null;
   keepalive_minutes: number | null;
   message_verbosity: number | null;
@@ -44,7 +44,7 @@ export async function getOrCreateIdentity(
     platform: opts.platform,
     workspace_id: opts.workspaceId,
     user_id: opts.userId,
-    active_repo_id: null,
+    active_project_id: null,
     onboarded_at: null,
     keepalive_minutes: null,
     message_verbosity: null,
@@ -102,11 +102,73 @@ export async function markIdentityOnboarded(db: Db, identityId: string): Promise
   await db.updateTable("identities").set({ onboarded_at: nowMs(), updated_at: nowMs() }).where("id", "=", identityId).execute();
 }
 
-export async function setIdentityActiveRepo(db: Db, identityId: string, repoId: string | null): Promise<void> {
+export async function resolveWebIdentityId(db: Db, wsIdentityId: string): Promise<string> {
+  const userId = wsIdentityId.startsWith('ws:') ? wsIdentityId.slice(3) : wsIdentityId;
+  const identity = await getOrCreateIdentity(db, {
+    platform: 'websocket',
+    workspaceId: null,
+    userId,
+  });
+  return identity.id;
+}
+
+
+
+export async function setIdentityActiveProject(db: Db, identityId: string, projectId: string | null): Promise<void> {
   await db
     .updateTable("identities")
-    .set({ active_repo_id: repoId, updated_at: nowMs() })
+    .set({ active_project_id: projectId, updated_at: nowMs() })
     .where("id", "=", identityId)
+    .execute();
+}
+
+export async function createProject(db: Db, opts: {
+  identityId: string;
+  type: ProjectType;
+  repoId: string | null;
+  name: string;
+}) {
+  const now = nowMs();
+  const id = crypto.randomUUID();
+  await db.insertInto("projects").values({
+    id,
+    identity_id: opts.identityId,
+    type: opts.type,
+    repo_id: opts.repoId,
+    name: opts.name,
+    created_at: now,
+    updated_at: now,
+  }).execute();
+  return await db.selectFrom("projects").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
+}
+
+export async function getProject(db: Db, projectId: string) {
+  return await db.selectFrom("projects").selectAll().where("id", "=", projectId).executeTakeFirst();
+}
+
+export async function getOrCreatePlaygroundProject(db: Db, identityId: string) {
+  const existing = await db.selectFrom("projects").selectAll()
+    .where("identity_id", "=", identityId)
+    .where("type", "=", "playground")
+    .executeTakeFirst();
+  if (existing) return existing;
+  return await createProject(db, { identityId, type: "playground", repoId: null, name: "playground" });
+}
+
+export async function getOrCreateRepoProject(db: Db, identityId: string, repoId: string, name: string) {
+  const existing = await db.selectFrom("projects").selectAll()
+    .where("identity_id", "=", identityId)
+    .where("repo_id", "=", repoId)
+    .executeTakeFirst();
+  if (existing) return existing;
+  return await createProject(db, { identityId, type: "repo", repoId, name });
+}
+
+export async function listCloudRunsForProject(db: Db, projectId: string, limit = 20) {
+  return await db.selectFrom("cloud_runs").selectAll()
+    .where("project_id", "=", projectId)
+    .orderBy("created_at", "desc")
+    .limit(limit)
     .execute();
 }
 
@@ -256,7 +318,7 @@ export async function listReposForIdentity(db: Db, identityId: string) {
 
 export async function createCloudRun(db: Db, opts: {
   identityId: string;
-  primaryRepoId: string | null;
+  projectId: string;
   provider: string;
   workspaceId: string;
   status: CloudRunStatus;
@@ -271,7 +333,7 @@ export async function createCloudRun(db: Db, opts: {
     .values({
       id,
       identity_id: opts.identityId,
-      primary_repo_id: opts.primaryRepoId,
+      project_id: opts.projectId,
       provider: opts.provider,
       workspace_id: opts.workspaceId,
       status: opts.status,
@@ -306,7 +368,7 @@ export async function updateCloudRun(db: Db, runId: string, patch: Partial<{
     .execute();
 }
 
-export async function addRunRepo(db: Db, opts: { runId: string; repoId: string; mountPath: string }) {
+export async function addRunRepo(db: Db, opts: { runId: string; repoId: string | null; mountPath: string }) {
   const id = crypto.randomUUID();
   await db.insertInto("cloud_run_repos").values({ id, run_id: opts.runId, repo_id: opts.repoId, mount_path: opts.mountPath }).execute();
 }
@@ -433,29 +495,9 @@ export async function listRunRepoIds(db: Db, runId: string): Promise<string[]> {
     .where("run_id", "=", runId)
     .orderBy("id", "asc")
     .execute();
-  return rows.map((r) => r.repo_id);
+  return rows.map((r) => r.repo_id).filter((id): id is string => id !== null);
 }
 
-export async function listCloudRunsForRepo(db: Db, repoId: string, limit = 20) {
-  return await db
-    .selectFrom("cloud_runs")
-    .selectAll()
-    .where("primary_repo_id", "=", repoId)
-    .orderBy("created_at", "desc")
-    .limit(limit)
-    .execute();
-}
-
-export async function listCloudRunsForPlayground(db: Db, identityId: string, limit = 20) {
-  return await db
-    .selectFrom("cloud_runs")
-    .selectAll()
-    .where("identity_id", "=", identityId)
-    .where("primary_repo_id", "is", null)
-    .orderBy("created_at", "desc")
-    .limit(limit)
-    .execute();
-}
 
 export async function listCloudRunsForIdentity(db: Db, opts: { identityId: string; limit?: number; before?: number | null }) {
   const limit = typeof opts.limit === "number" && Number.isFinite(opts.limit) && opts.limit > 0 ? Math.floor(opts.limit) : 20;
@@ -780,13 +822,11 @@ export async function upsertNotionMcpToken(db: Db, opts: {
   return id;
 }
 
-export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: string; hash: string }) {
+export async function putSetupSpec(db: Db, opts: { projectId: string; ymlBlob: string; hash: string }) {
   const now = nowMs();
-  const existing = await db
-    .selectFrom("setup_specs")
-    .selectAll()
-    .where("repo_id", "=", opts.repoId)
+  const existing = await db.selectFrom("setup_specs").selectAll()
     .where("hash", "=", opts.hash)
+    .where("project_id", "=", opts.projectId)
     .executeTakeFirst();
   if (existing) return existing.id;
   const id = crypto.randomUUID();
@@ -794,7 +834,7 @@ export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: stri
     .insertInto("setup_specs")
     .values({
       id,
-      repo_id: opts.repoId,
+      project_id: opts.projectId,
       yml_blob: opts.ymlBlob,
       hash: opts.hash,
       snapshot_id: null,
@@ -805,11 +845,11 @@ export async function putSetupSpec(db: Db, opts: { repoId: string; ymlBlob: stri
   return id;
 }
 
-export async function getLatestSetupSpec(db: Db, repoId: string) {
+export async function getLatestSetupSpec(db: Db, projectId: string) {
   return await db
     .selectFrom("setup_specs")
     .selectAll()
-    .where("repo_id", "=", repoId)
+    .where("project_id", "=", projectId)
     .orderBy("created_at", "desc")
     .limit(1)
     .executeTakeFirst();

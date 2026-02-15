@@ -50,25 +50,25 @@ describe("E2E: AGENTS.md Prompts", () => {
     // Authenticate (required even in no-auth mode to set up anonymous identity)
     ws.send({ type: "auth" });
 
-    // Wait for auth_ok
+    // Wait for auth_result
     const authOk = await ws.waitForMessage(
-      (msg: any) => msg.type === "auth_ok",
+      (msg: any) => msg.type === "auth_result" && msg.success === true,
       5000
     );
 
-    assert.ok(authOk, "Should receive auth_ok message");
+    assert.ok(authOk, "Should receive auth_result message");
     identityId = authOk.identityId || testIdentityId;
     // For WebSocket platform, platform="websocket" and userId=identityId
     platform = "websocket";
     userId = identityId;
 
-    // Wait for sandbox_ready to ensure workspace is provisioned
+    // Wait for sandbox_status ready to ensure workspace is provisioned
     // The server auto-provisions a workspace for WebSocket connections
     const sandboxReady = await ws.waitForMessage(
-      (msg: any) => msg.type === "sandbox_ready",
+      (msg: any) => msg.type === "sandbox_status" && msg.status === "ready",
       30000
     );
-    assert.ok(sandboxReady, "Should receive sandbox_ready message");
+    assert.ok(sandboxReady, "Should receive sandbox_status ready message");
   });
 
   // Reset language to English before each test
@@ -95,17 +95,18 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-1",
       repoIds: [], // Empty list for minimal setup
       prompt: "Hello",
     });
 
-    // Wait for session_started
+    // Wait for run_status(started)
     const started = await ws.waitForMessage(
-      (msg: any) => msg.type === "session_started",
+      (msg: any) => msg.type === "run_status" && msg.status === "started",
       60000
     );
 
-    assert.ok(started, "Should receive session_started message");
+    assert.ok(started, "Should receive run_status(started) message");
     // Note: fields are camelCase in the message
     sessionId = started.sessionId ?? null;
     const runId = started.runId ?? null;
@@ -138,16 +139,17 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-2",
       repoIds: [],
       prompt: "Hello",
     });
 
     const started = await ws.waitForMessage(
-      (msg: any) => msg.type === "session_started",
+      (msg: any) => msg.type === "run_status" && msg.status === "started",
       60000
     );
 
-    assert.ok(started, "Should receive session_started message");
+    assert.ok(started, "Should receive run_status(started) message");
     sessionId = started.sessionId ?? null;
     const runId = started.runId ?? null;
 
@@ -173,16 +175,17 @@ describe("E2E: AGENTS.md Prompts", () => {
 
     ws.send({
       type: "cloud_run",
+      chatId: "chat-e2e-3",
       repoIds: [],
       prompt: "Hello",
     });
 
     const started = await ws.waitForMessage(
-      (msg: any) => msg.type === "session_started",
+      (msg: any) => msg.type === "run_status" && msg.status === "started",
       60000
     );
 
-    assert.ok(started, "Should receive session_started message");
+    assert.ok(started, "Should receive run_status(started) message");
     sessionId = started.sessionId ?? null;
     const runId = started.runId ?? null;
 

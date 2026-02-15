@@ -27,6 +27,8 @@ import * as githubMcpTokens0024 from "./migrations/0024_github_mcp_tokens.js";
 import * as notionMcp0025 from "./migrations/0025_notion_mcp.js";
 import * as exaApiKeys0026 from "./migrations/0026_exa_api_keys.js";
 import * as parallelApiKeys0027 from "./migrations/0027_parallel_api_keys.js";
+import * as projects0028 from "./migrations/0028_projects.js";
+import * as dropOldRepoColumns0029 from "./migrations/0029_drop_old_repo_columns.js";
 
 const provider = {
   async getMigrations() {
@@ -57,6 +59,8 @@ const provider = {
       "0025_notion_mcp": notionMcp0025,
       "0026_exa_api_keys": exaApiKeys0026,
       "0027_parallel_api_keys": parallelApiKeys0027,
+      "0028_projects": projects0028,
+      "0029_drop_old_repo_columns": dropOldRepoColumns0029,
     };
   },
 };

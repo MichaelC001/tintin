@@ -28,27 +28,13 @@ import {
   extractCommandFromToolArgs,
   extractMcpResultText,
   formatCommand,
-  formatToolPairMessage,
   normalizeAgentMessage,
   normalizeMessageVerbosity,
   numberOrNull,
   stringOrEmpty,
   truncateLogLine,
 } from "./eventMappers/helpers.js";
-
-interface BufferState {
-  text: string;
-  lastFlushMs: number;
-}
-
-export type MessageVerbosity = 1 | 2 | 3;
-
-export type StreamFragment =
-  | { kind: "text"; text: string; continuous?: boolean; separate?: boolean }
-  | { kind: "tool_call"; text: string }
-  | { kind: "tool_output"; text: string }
-  | { kind: "plan_update"; plan: Array<{ step: string; status: string }>; explanation?: string }
-  | { kind: "final" };
+import type { StreamFragment, BufferState, MessageVerbosity } from "./types.js";
 
 const USER_PRIORITY_BURST_MESSAGES = 5;
 const CLOUD_PROJECT_PREFIX = "cloud:";
@@ -287,21 +273,33 @@ export class JsonlStreamer {
           }
 
           if (frag.kind === "tool_call") {
-            this.toolCalls.push(session.id, frag.text);
+            const toolName = frag.toolName ?? "unknown";
+            this.toolCalls.push(session.id, {
+              text: frag.text,
+              toolName,
+              toolInput: frag.toolInput,
+            });
+            await this.flushIfNeeded(session.id, true);
+            await this.sendToSession(session.id, {
+              type: "tool_call",
+              name: toolName,
+              input: frag.toolInput,
+              priority: this.takeSendPriority(session.id),
+            });
             continue;
           }
 
           if (frag.kind === "tool_output") {
-            const callText = this.toolCalls.shift(session.id);
-
+            const pending = this.toolCalls.shift(session.id);
             await this.flushIfNeeded(session.id, true);
-            const maxChars = this.config.telegram?.max_chars ?? this.config.slack?.max_chars ?? 3500;
-            const msg = formatToolPairMessage({
-              callText,
-              outputText: frag.text,
-              maxMessageChars: maxChars,
+            await this.sendToSession(session.id, {
+              type: "tool_output",
+              name: frag.toolName ?? pending?.toolName ?? "unknown",
+              output: frag.text,
+              callText: pending?.text,
+              formatAsCode: frag.formatAsCode,
+              priority: this.takeSendPriority(session.id),
             });
-            await this.sendToSession(session.id, { text: msg, priority: this.takeSendPriority(session.id) });
             this.markUserFacingOutput(session.id);
           }
         }
@@ -840,4 +838,3 @@ function extractShellCommandFromEvent(obj: Record<string, unknown>): string | nu
   return null;
 }
 
-// Re-export helpers for controller usage.

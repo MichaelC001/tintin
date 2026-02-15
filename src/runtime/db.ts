@@ -95,7 +95,7 @@ export interface IdentitiesTable {
   platform: string;
   workspace_id: string | null;
   user_id: string;
-  active_repo_id: string | null;
+  active_project_id: string | null;
   onboarded_at: number | null;
   keepalive_minutes: number | null;
   message_verbosity: number | null;
@@ -133,12 +133,24 @@ export interface ReposTable {
   updated_at: number;
 }
 
+export type ProjectType = "repo" | "playground";
+
+export interface ProjectsTable {
+  id: string;
+  identity_id: string;
+  type: string; // ProjectType
+  repo_id: string | null;
+  name: string;
+  created_at: number;
+  updated_at: number;
+}
+
 export type CloudRunStatus = "queued" | "running" | "finished" | "error" | "killed";
 
 export interface CloudRunsTable {
   id: string;
   identity_id: string;
-  primary_repo_id: string | null;
+  project_id: string;
   provider: string;
   workspace_id: string;
   status: CloudRunStatus;
@@ -156,7 +168,7 @@ export interface CloudRunsTable {
 export interface CloudRunReposTable {
   id: string;
   run_id: string;
-  repo_id: string;
+  repo_id: string | null;
   mount_path: string;
 }
 
@@ -263,7 +275,7 @@ export interface SecretsTable {
 
 export interface SetupSpecsTable {
   id: string;
-  repo_id: string;
+  project_id: string;
   yml_blob: string;
   hash: string;
   snapshot_id: string | null;
@@ -457,6 +469,7 @@ export interface DatabaseSchema {
   identities: IdentitiesTable;
   connections: ConnectionsTable;
   repos: ReposTable;
+  projects: ProjectsTable;
   cloud_runs: CloudRunsTable;
   cloud_run_repos: CloudRunReposTable;
   cloud_run_screenshots: CloudRunScreenshotsTable;

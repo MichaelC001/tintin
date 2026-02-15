@@ -36,10 +36,12 @@ npm run migrate        # Database migrations
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  User Interface Layer                                       │
-│  Telegram Bot │ Slack Bot │ WebSocket │ Cloud UI            │
+│  Telegram Bot │ Slack Bot │ Cloud UI                        │
+│                             (HTTP REST + WebSocket)         │
 ├─────────────────────────────────────────────────────────────┤
 │  Service Layer                                              │
 │  service.ts → controller2.ts → controller/* (handlers)      │
+│  githubRoutes (HTTP REST) │ websocket/handler (Agent Exec)  │
 ├─────────────────────────────────────────────────────────────┤
 │  Execution Layer                                            │
 │  SessionManager │ CloudManager │ McpRegistry                │
@@ -60,11 +62,14 @@ npm run migrate        # Database migrations
 | Module | LOC | Responsibility |
 |--------|-----|----------------|
 | **controller2.ts** | 367 | Central BotController - platform dispatch, command routing |
-| **sessionManager.ts** | 1084 | Agent session lifecycle - spawn, monitor, terminate |
-| **cloud/manager.ts** | 4533 | Cloud orchestration - Modal/Local providers |
-| **streamer/JsonlStreamer.ts** | 843 | JSONL to chat fragments conversion |
-| **websocket/handler.ts** | 306 | WebSocket message routing & auth |
-| **mcp/registry.ts** | - | MCP server lifecycle management |
+| **sessionManager.ts** | 1174 | Agent session lifecycle - spawn, monitor, terminate |
+| **cloud/manager.ts** | 4699 | Cloud orchestration - Modal/Local providers |
+| **streamer/JsonlStreamer.ts** | 840 | JSONL to chat fragments conversion |
+| **service/sessionMessenger.ts** | 752 | Platform message formatting & WebSocket routing |
+| **service/http/agentRoutes.ts** | 888 | Agent log relay & cloud API endpoints |
+| **service/http/githubRoutes.ts** | 487 | GitHub HTTP REST API (auth, repos, OAuth, disconnect) |
+| **websocket/handler.ts** | 256 | WebSocket agent execution messaging |
+| **mcp/registry.ts** | 108 | MCP server lifecycle management |
 
 ## 🔧 File Structure
 
@@ -75,12 +80,24 @@ src/runtime/
 │   ├── controller2.ts          # Central BotController
 │   ├── sessionManager.ts       # Session lifecycle
 │   ├── streamer/               # JSONL streaming components
+│   │   └── eventMappers/       # Agent-specific event mapping
 │   ├── cloud/                  # Cloud execution (30+ files)
-│   ├── websocket/              # WebSocket communication
+│   │   ├── repos.ts            # Centralized repo sync logic
+│   │   └── notion/             # Notion MCP OAuth integration
+│   ├── service/
+│   │   ├── httpServer.ts       # HTTP server setup & route mounting
+│   │   ├── sessionMessenger.ts # Platform message formatting & WS routing
+│   │   └── http/
+│   │       ├── githubRoutes.ts # GitHub REST API endpoints
+│   │       ├── agentRoutes.ts  # Agent log relay & execution routes
+│   │       └── cloudApiRoutes.ts # Cloud API endpoints
+│   ├── websocket/              # WebSocket agent execution
+│   │   └── services/           # CloudRunService, identity, sandbox
 │   ├── mcp/                    # Model Context Protocol
+│   │   └── providers/          # stdio, http, github, exa, parallel, playwright
 │   ├── platform/               # Platform adapters (Telegram/Slack)
 │   └── controller/             # Modular handlers
-└── migrations/                 # Database migrations (26 files)
+└── migrations/                 # Database migrations (29 files)
 ```
 
 ## 🎨 Design Patterns
@@ -98,12 +115,17 @@ src/runtime/
 
 **ORM:** Kysely (supports SQLite/PostgreSQL/MySQL)
 
-**Key Tables:**
+**Key Tables (33 total):**
 - `sessions` - Agent session records
 - `identities` - User identities with preferences
+- `projects` - Projects (repo or playground) binding
 - `connections` - OAuth connections
-- `cloud_runs` - Cloud execution runs
-- `repos` - Connected repositories
+- `cloud_runs` / `cloud_workspaces` / `cloud_snapshots` - Cloud execution
+- `repos` / `shared_repos` - Connected repositories
+- `github_installations` / `github_webhook_events` - GitHub App integration
+- `chatgpt_accounts` / `slack_installations` - Platform OAuth
+- `notion_mcp_clients` / `notion_mcp_tokens` - Notion MCP OAuth
+- `exa_api_keys` / `parallel_api_keys` - MCP provider keys
 
 ## 🌐 Internationalization
 

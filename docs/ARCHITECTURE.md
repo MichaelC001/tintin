@@ -9,14 +9,17 @@ graph TB
     subgraph UI["User Interface Layer"]
         TG[Telegram Bot]
         SL[Slack Bot]
-        WS[WebSocket]
-        UI[Cloud UI]
+        CUI[Cloud UI]
     end
 
     subgraph Service["Service Layer"]
         SVC[service.ts<br/>HTTP Server]
         CTL[controller2.ts<br/>BotController]
         CTRL[controller/<br/>Modular Handlers]
+        MSG[sessionMessenger.ts<br/>Message Routing]
+        GHR[githubRoutes.ts<br/>GitHub REST API]
+        AGR[agentRoutes.ts<br/>Agent Log Relay]
+        WSH[websocket/handler<br/>Agent Execution]
     end
 
     subgraph Execution["Execution Layer"]
@@ -45,12 +48,18 @@ graph TB
 
     TG --> SVC
     SL --> SVC
-    WS --> SVC
-    UI --> SVC
+    CUI -->|HTTP REST| GHR
+    CUI -->|HTTP REST| AGR
+    CUI -->|WebSocket| WSH
     SVC --> CTL
     CTL --> CTRL
     CTRL --> SM
     CTRL --> CM
+    CTRL --> MSG
+    GHR --> CM
+    AGR --> CM
+    WSH --> CM
+    MSG -->|WS/Platform| CUI
     SM --> MCP
     SM --> AA
     CM --> AA
@@ -61,6 +70,7 @@ graph TB
     JL --> JS
     JS --> TCM
     JS --> PSM
+    JS --> MSG
     SM --> DB
     CM --> DB
     CM --> S3
@@ -89,13 +99,21 @@ graph TD
     CM --> CS[cloud/<br/>store]
 
     WH --> WSC[websocket/<br/>services/cloud]
-    WH --> WSG[websocket/<br/>services/github]
     WH --> WSI[websocket/<br/>services/identity]
+
+    GHR[service/http/<br/>githubRoutes] --> CR[cloud/<br/>repos]
+    GHR --> GA[cloud/<br/>githubApp]
+    GHR --> OA[cloud/<br/>oauth]
+    GHR --> ST[store]
+
+    AGR[service/http/<br/>agentRoutes] --> SMSG[service/<br/>sessionMessenger]
+    CAR[service/http/<br/>cloudApiRoutes] --> CM
 
     SM --> AG[agents.ts]
     AG --> JS[streamer/<br/>JsonlStreamer]
     JS --> TM[streamer/<br/>ToolCallManager]
     JS --> EM[streamer/<br/>eventMappers]
+    JS --> SMSG
 
     SM --> MR[mcp/<br/>registry]
     MR --> MF[mcp/<br/>factory]
@@ -254,21 +272,33 @@ sequenceDiagram
 | Module | Responsibility | Key Methods |
 |--------|----------------|-------------|
 | **service.ts** | HTTP server & bot initialization | start(), handleOAuth() |
+| **service/httpServer.ts** | HTTP server setup & route mounting | createServer(), mountRoutes() |
+| **service/sessionMessenger.ts** | Platform message formatting & WebSocket routing | sendToSession(), formatFragment() |
+| **service/http/githubRoutes.ts** | GitHub HTTP REST API (auth, repos, OAuth, disconnect) | handleGithubApiRoutes() |
+| **service/http/agentRoutes.ts** | Agent log relay & execution API | handleAgentLogRelay() |
+| **service/http/cloudApiRoutes.ts** | Cloud API endpoints | handleCloudApiRoutes() |
 | **controller2.ts** | Central BotController | handleChat(), handleInteraction() |
 | **controller/telegramHandler.ts** | Telegram-specific handling | handleCommand(), handleCallback() |
 | **controller/slackHandler.ts** | Slack-specific handling | handleCommand(), handleShortcut() |
 | **controller/cloudHandler.ts** | Cloud command handling | cloudHelp(), cloudStatus() |
+| **controller/interactionHandler.ts** | Button/selection handling | handleInteraction() |
 | **sessionManager.ts** | Agent session lifecycle | startNew(), resumeSession(), kill() |
 | **session/SessionStateMachine.ts** | State transition validation | canTransition(), transition() |
 | **session/ProcessLifecycleManager.ts** | Process registration/kill | register(), killAll() |
 | **session/EnvironmentBuilder.ts** | Fluent env var builder | withLanguage(), withCloudProxy() |
+| **session/ChatGptProxyManager.ts** | ChatGPT OAuth proxy lifecycle | startProxy(), stopProxy() |
 | **cloud/manager.ts** | Cloud run orchestration | startRun(), getLogs(), snapshot() |
 | **cloud/modalProvider.ts** | Modal sandbox provider | createSandbox(), execute() |
 | **cloud/localProvider.ts** | Local provider (testing) | createSandbox(), execute() |
-| **websocket/handler.ts** | WebSocket message routing | handleMessage(), authenticate() |
+| **cloud/repos.ts** | Centralized repo sync logic | syncReposForIdentity(), fetchGithubRepos() |
+| **cloud/notion/** | Notion MCP OAuth integration | discovery, oauth, registration, token |
+| **websocket/handler.ts** | WebSocket agent execution messaging | handleMessage(), authenticate() |
 | **websocket/services/cloud.ts** | CloudRunService | handleCloudRun(), subscribeRun() |
+| **websocket/services/sandboxLifecycle.ts** | Sandbox provisioning | provisionSandbox() |
 | **streamer/JsonlStreamer.ts** | JSONL to StreamFragment | pollOnce(), mapToFragment() |
 | **streamer/ToolCallManager.ts** | Tool call/output pairing | push(), shift(), formatPair() |
+| **streamer/PlanUpdateHandler.ts** | Plan update parsing | handlePlanUpdate() |
+| **streamer/eventMappers/** | Agent-specific event mapping | claudeMapper, codexMapper, helpers |
 | **mcp/registry.ts** | MCP server lifecycle | register(), startAll(), stopAll() |
 | **platform/telegram.ts** | Telegram client | sendMessage(), sendPhoto() |
 | **platform/slack.ts** | Slack client | postMessage(), update() |

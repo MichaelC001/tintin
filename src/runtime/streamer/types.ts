@@ -6,6 +6,7 @@ import type { UserLanguage } from "../../locales/index.js";
 export interface PendingToolCall {
   text: string;
   toolName: string;
+  toolInput?: string;
 }
 
 /**

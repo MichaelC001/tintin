@@ -10,6 +10,7 @@ import type { WebSocketManager } from "../websocket/manager.js";
 import type { ServerMessage } from "../websocket/types.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 import { mergeTextIntoSlackBlocks } from "../message/slack.js";
+import { formatToolPairMessage } from "../streamer.js";
 
 type SessionLanguageResolver = (session: { language?: string | null }) => UserLanguage;
 
@@ -493,6 +494,20 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
           name: "screenshot",
           output: message.caption ?? message.filename,
         };
+      } else if (message.type === "tool_call") {
+        wsMessage = {
+          type: "tool_call",
+          sessionId,
+          name: message.name,
+          input: message.input,
+        };
+      } else if (message.type === "tool_output") {
+        wsMessage = {
+          type: "tool_output",
+          sessionId,
+          name: message.name,
+          output: message.output,
+        };
       } else if (isTextMessage(message)) {
         wsMessage = { type: "chunk", sessionId, content: message.text };
         if (message.final) {
@@ -544,8 +559,21 @@ export function createSessionMessenger(deps: SessionMessengerDeps): SessionMesse
       await sendToSession(sessionId, { text: `${caption}\n${t("image.saved_at", lang, { path: message.path })}`, priority: "user" });
       return;
     }
+    if (message.type === "tool_call") {
+      return;
+    }
+    if (message.type === "tool_output") {
+      const maxChars = deps.config.telegram?.max_chars ?? deps.config.slack?.max_chars ?? 3500;
+      message = {
+        text: formatToolPairMessage({
+          callText: message.callText ?? null,
+          outputText: message.output,
+          maxMessageChars: maxChars,
+        }),
+        priority: message.priority,
+      };
+    }
     if (!isTextMessage(message)) {
-      // tool_call and tool_output are handled elsewhere or ignored for now
       return;
     }
     const text = message.text;

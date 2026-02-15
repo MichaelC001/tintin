@@ -1,3 +1,13 @@
+import type { AppConfig } from "../config.js";
+import type { Db } from "../db.js";
+import {
+  listConnections,
+  listGithubInstallationsForIdentity,
+  replaceGithubInstallationRepos,
+  upsertRepo,
+} from "./store.js";
+import { ensureGithubAppTokenForInstallation } from "./githubApp.js";
+
 export interface RemoteRepo {
   providerRepoId: string;
   name: string;
@@ -66,6 +76,58 @@ export async function fetchGithubInstallationRepos(opts: { token: string; apiBas
     if (items.length < perPage) break;
   }
   return repos;
+}
+
+export async function syncReposForIdentity(opts: {
+  db: Db;
+  config: AppConfig['cloud'];
+  identityId: string;
+}): Promise<{ stale: boolean }> {
+  const { db, config, identityId } = opts;
+  if (!config?.github_app || !config.secrets_key) return { stale: false };
+
+  const installations = await listGithubInstallationsForIdentity(db, identityId);
+  let anyFailed = false;
+
+  for (const inst of installations) {
+    if (inst.status !== 'active') continue;
+    try {
+      const tokenResult = await ensureGithubAppTokenForInstallation({
+        db,
+        config: config.github_app,
+        secretKey: config.secrets_key,
+        installationId: inst.installation_id,
+      });
+      const remoteRepos = await fetchGithubInstallationRepos({
+        token: tokenResult.token,
+        apiBaseUrl: config.github_app.api_base_url,
+      });
+      await replaceGithubInstallationRepos(db, {
+        installationId: inst.installation_id,
+        repos: remoteRepos,
+      });
+      const connections = await listConnections(db, identityId);
+      const conn = connections.find(
+        c => c.type === 'github_app' && c.installation_id === inst.installation_id
+      );
+      if (conn) {
+        for (const repo of remoteRepos) {
+          await upsertRepo(db, {
+            connectionId: conn.id,
+            provider: 'github',
+            providerRepoId: repo.providerRepoId,
+            name: repo.name,
+            url: repo.url,
+            defaultBranch: repo.defaultBranch,
+          });
+        }
+      }
+    } catch {
+      anyFailed = true;
+    }
+  }
+
+  return { stale: anyFailed };
 }
 
 export async function fetchGitlabRepos(opts: { token: string; apiBaseUrl: string }): Promise<RemoteRepo[]> {

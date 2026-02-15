@@ -8,8 +8,10 @@ import { ErrorCodes } from '../types.js';
 import { IdentityResolver } from './identity.js';
 import { CloudLinkBuilder } from './linkBuilder.js';
 import type { SandboxLifecycleService } from './sandboxLifecycle.js';
-import { listReposForIdentity, getCloudRun } from '../../cloud/store.js';
+import { listReposForIdentity, getCloudRunBySession, getProject, getOrCreatePlaygroundProject, getOrCreateRepoProject } from '../../cloud/store.js';
+import { isPlayground as isPlaygroundProject, type Project } from '../../cloud/project.js';
 import { mapDbStatusToWsStatus } from '../../cloud/types.js';
+import { countConcurrentSessionsForUser, countSessionsForUser, getLatestSessionForChat } from '../../store.js';
 import type { SessionRow } from '../../store.js';
 
 interface FollowUpEntry {
@@ -48,6 +50,16 @@ export class CloudRunService {
     conn: WSConnection,
     message: CloudRunMessage,
   ): Promise<void> {
+    const chatId = this.normalizeChatId(message.chatId);
+    if (!chatId) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.INVALID_MESSAGE,
+        message: 'Valid chatId is required',
+      });
+      return;
+    }
+
     const prompt = message.prompt?.trim();
     if (!prompt) {
       this.wsManager.sendToConnection(connId, {
@@ -66,7 +78,7 @@ export class CloudRunService {
         this.wsManager.sendToConnection(connId, {
           type: 'error',
           code: ErrorCodes.SERVICE_ERROR,
-          message: 'Sandbox is still provisioning. Please wait for sandbox_ready message.',
+          message: 'Sandbox is still provisioning. Please wait for sandbox_status ready.',
         });
         return;
       }
@@ -101,8 +113,48 @@ export class CloudRunService {
 
     try {
       const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
-      const repoIds = message.repoIds ?? [];
-      const isPlayground = repoIds.length === 0;
+
+      // Resolve project: prefer projectId, fall back to repoIds
+      let project: Project;
+      let repoIds: string[];
+      if (message.projectId) {
+        const p = await getProject(this.db, message.projectId);
+        if (!p) {
+          this.wsManager.sendToConnection(connId, {
+            type: 'error',
+            code: ErrorCodes.INVALID_MESSAGE,
+            message: 'Project not found',
+          });
+          return;
+        }
+        project = { id: p.id, identityId: p.identity_id, type: p.type as "repo" | "playground", repoId: p.repo_id, name: p.name };
+        repoIds = p.repo_id ? [p.repo_id] : [];
+      } else {
+        const msgRepoIds = message.repoIds ?? [];
+        repoIds = msgRepoIds;
+        if (msgRepoIds.length === 0) {
+          const pg = await getOrCreatePlaygroundProject(this.db, dbIdentityId);
+          project = { id: pg.id, identityId: pg.identity_id, type: pg.type as "repo" | "playground", repoId: pg.repo_id, name: pg.name };
+        } else {
+          const repo = await this.db.selectFrom("repos").select("name").where("id", "=", msgRepoIds[0]!).executeTakeFirst();
+          const rp = await getOrCreateRepoProject(this.db, dbIdentityId, msgRepoIds[0]!, repo?.name ?? "repo");
+          project = { id: rp.id, identityId: rp.identity_id, type: rp.type as "repo" | "playground", repoId: rp.repo_id, name: rp.name };
+        }
+      }
+      const isPlayground = isPlaygroundProject(project);
+      const virtualChatId = this.buildVirtualChatId(conn.identityId!, chatId);
+
+      const identityOk = await this.assertIdentitySessionLimits(connId, dbIdentityId);
+      if (!identityOk) return;
+      const activeSession = await getLatestSessionForChat(this.db, 'websocket', virtualChatId, ['starting', 'running']);
+      if (activeSession) {
+        this.wsManager.sendToConnection(connId, {
+          type: 'error',
+          code: ErrorCodes.INVALID_MESSAGE,
+          message: 'Chat already has an active run. Stop it or send a follow-up.',
+        });
+        return;
+      }
 
       // Validate repo access if repos specified
       if (!isPlayground) {
@@ -145,8 +197,7 @@ export class CloudRunService {
       });
 
       // Build virtual chat/space IDs for WebSocket
-      const virtualChatId = `ws:${conn.identityId}`;
-      const virtualSpaceId = `${Date.now()}`;
+      const virtualSpaceId = `${chatId}:${Date.now()}`;
 
       let runId: string;
       let sessionId: string;
@@ -170,9 +221,9 @@ export class CloudRunService {
           spaceId: virtualSpaceId,
           userId: conn.identityId!,
           prompt,
+          project,
           repoIds,
           agent,
-          playground: isPlayground,
           restoreSnapshotId,
         });
 
@@ -194,9 +245,9 @@ export class CloudRunService {
           spaceId: virtualSpaceId,
           userId: conn.identityId!,
           prompt,
+          project,
           repoIds,
           agent,
-          playground: isPlayground,
           restoreSnapshotId,
         });
 
@@ -208,11 +259,12 @@ export class CloudRunService {
       // Subscribe connection to session
       this.wsManager.subscribeToSession(connId, sessionId);
 
-      // Send session started message
+      // Send session started via run_status
       this.wsManager.sendToConnection(connId, {
-        type: 'session_started',
-        sessionId,
+        type: 'run_status',
         runId,
+        sessionId,
+        status: 'started',
       });
 
       // Send browser session CDP URL if available
@@ -262,33 +314,22 @@ export class CloudRunService {
   }
 
   /**
-   * Stop a cloud run by its run ID.
+   * Stop a cloud run by chat ID (latest running session).
    * Validates ownership, kills the session, and marks sandbox as ready.
    */
   async handleCloudStop(
     connId: string,
     conn: WSConnection,
-    runId: string,
+    chatId: string,
   ): Promise<void> {
     try {
-      const validated = await this.validateRun(connId, runId);
+      const validated = await this.resolveChatRun(connId, conn, chatId, { requireRunning: true });
       if (!validated) return;
 
       const { run, sessionId } = validated;
 
-      // Validate ownership
-      const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
-      if (run.identity_id !== dbIdentityId) {
-        this.wsManager.sendToConnection(connId, {
-          type: 'error',
-          code: ErrorCodes.ACCESS_DENIED,
-          message: 'You do not have access to this run',
-        });
-        return;
-      }
-
       // Stop the cloud run
-      const stopped = await this.cloudManager.stopCloudRun(runId);
+      const stopped = await this.cloudManager.stopCloudRun(run.id);
       if (!stopped) {
         this.wsManager.sendToConnection(connId, {
           type: 'error',
@@ -310,7 +351,7 @@ export class CloudRunService {
         stopped: true,
       });
 
-      this.logger.info(`[ws][cloud] run stopped connId=${connId} runId=${runId} sessionId=${sessionId}`);
+      this.logger.info(`[ws][cloud] run stopped connId=${connId} runId=${run.id} sessionId=${sessionId}`);
     } catch (err) {
       this.logger.error(`[ws][cloud] handleCloudStop error connId=${connId}: ${String(err)}`);
       this.wsManager.sendToConnection(connId, {
@@ -321,9 +362,9 @@ export class CloudRunService {
     }
   }
 
-  async handleSubscribeRun(connId: string, runId: string): Promise<void> {
+  async handleSubscribeChat(connId: string, conn: WSConnection, chatId: string): Promise<void> {
     try {
-      const validated = await this.validateRun(connId, runId);
+      const validated = await this.resolveChatRun(connId, conn, chatId, { preferRunning: true });
       if (!validated) return;
 
       const { run, sessionId } = validated;
@@ -334,27 +375,27 @@ export class CloudRunService {
       // Send current run status
       this.wsManager.sendToConnection(connId, {
         type: 'run_status',
-        runId,
+        runId: run.id,
         status: mapDbStatusToWsStatus(run.status),
       });
 
       // Send run links
-      const viewUrl = this.linkBuilder.buildViewUrl(runId);
+      const viewUrl = this.linkBuilder.buildViewUrl(run.id);
       this.wsManager.sendToConnection(connId, {
         type: 'run_links',
-        runId,
+        runId: run.id,
         sessionId,
         viewUrl,
       });
 
       // Try to get VS Code URL immediately, or start polling if not available
-      this.pollAndSendVscodeUrl(connId, runId, sessionId).catch((err) => {
-        this.logger.debug(`[ws][cloud] vscode poll error runId=${runId}: ${String(err)}`);
+      this.pollAndSendVscodeUrl(connId, run.id, sessionId).catch((err) => {
+        this.logger.debug(`[ws][cloud] vscode poll error runId=${run.id}: ${String(err)}`);
       });
 
-      this.logger.debug(`[ws][cloud] subscribed to run connId=${connId} runId=${runId} sessionId=${sessionId}`);
+      this.logger.debug(`[ws][cloud] subscribed to run connId=${connId} runId=${run.id} sessionId=${sessionId}`);
     } catch (err) {
-      this.logger.error(`[ws][cloud] handleSubscribeRun error connId=${connId}: ${String(err)}`);
+      this.logger.error(`[ws][cloud] handleSubscribeChat error connId=${connId}: ${String(err)}`);
       this.wsManager.sendToConnection(connId, {
         type: 'error',
         code: ErrorCodes.SERVICE_ERROR,
@@ -373,14 +414,14 @@ export class CloudRunService {
     conn: WSConnection,
     message: CloudFollowUpMessage,
   ): Promise<void> {
-    const { runId } = message;
+    const { chatId } = message;
     const prompt = message.prompt?.trim();
 
-    if (!runId) {
+    if (!chatId) {
       this.wsManager.sendToConnection(connId, {
         type: 'error',
         code: ErrorCodes.INVALID_MESSAGE,
-        message: 'Run ID required',
+        message: 'Chat ID required',
       });
       return;
     }
@@ -395,22 +436,11 @@ export class CloudRunService {
     }
 
     try {
-      // Validate the run exists and has a session
-      const validated = await this.validateRun(connId, runId);
+      // Resolve the latest run for the chat
+      const validated = await this.resolveChatRun(connId, conn, chatId, { preferRunning: true });
       if (!validated) return;
 
       const { run, sessionId } = validated;
-
-      // Validate ownership
-      const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
-      if (run.identity_id !== dbIdentityId) {
-        this.wsManager.sendToConnection(connId, {
-          type: 'error',
-          code: ErrorCodes.ACCESS_DENIED,
-          message: 'You do not have access to this run',
-        });
-        return;
-      }
 
       // Get session to check status
       const session = await this.db
@@ -440,7 +470,7 @@ export class CloudRunService {
 
       // If session is still active, queue the follow-up
       if (session.status === 'running' || session.status === 'starting') {
-        const position = this.enqueueFollowUp(sessionId, { connId, prompt, runId });
+        const position = this.enqueueFollowUp(sessionId, { connId, prompt, runId: run.id });
         if (position < 0) {
           this.wsManager.sendToConnection(connId, {
             type: 'error',
@@ -454,20 +484,21 @@ export class CloudRunService {
         this.wsManager.subscribeToSession(connId, sessionId);
 
         this.wsManager.sendToConnection(connId, {
-          type: 'follow_up_queued',
-          runId,
+          type: 'follow_up_status',
+          runId: run.id,
           sessionId,
+          status: 'queued',
           position,
         });
 
         this.logger.info(
-          `[ws][cloud] follow-up queued connId=${connId} runId=${runId} sessionId=${sessionId} position=${position}`,
+          `[ws][cloud] follow-up queued connId=${connId} runId=${run.id} sessionId=${sessionId} position=${position}`,
         );
         return;
       }
 
       // Session is finished or errored - attempt resume/restart
-      await this.resumeFollowUp(connId, runId, sessionId, session as SessionRow, prompt);
+      await this.resumeFollowUp(connId, run.id, sessionId, session as SessionRow, prompt);
     } catch (err) {
       this.logger.error(`[ws][cloud] handleCloudFollowUp error connId=${connId}: ${String(err)}`);
       this.wsManager.sendToConnection(connId, {
@@ -480,56 +511,55 @@ export class CloudRunService {
 
   /**
    * Process queued follow-up prompts after a session completes.
-   * Called by the sandbox lifecycle / session completion hook.
+   * Called from the session completion hook in service.ts.
+   * Iterates the queue until a follow-up is successfully resumed or the queue is exhausted.
    */
   async processQueuedFollowUps(sessionId: string): Promise<void> {
-    const queue = this.followUpQueues.get(sessionId);
-    if (!queue || queue.length === 0) {
-      this.followUpQueues.delete(sessionId);
-      return;
-    }
+    while (true) {
+      const queue = this.followUpQueues.get(sessionId);
+      if (!queue || queue.length === 0) {
+        this.followUpQueues.delete(sessionId);
+        return;
+      }
 
-    // Take next entry
-    const entry = queue.shift()!;
-    if (queue.length === 0) {
-      this.followUpQueues.delete(sessionId);
-    }
+      const entry = queue.shift()!;
+      if (queue.length === 0) {
+        this.followUpQueues.delete(sessionId);
+      }
 
-    // Check if the connection is still alive
-    const conn = this.wsManager.getConnection(entry.connId);
-    if (!conn) {
-      this.logger.debug(
-        `[ws][cloud] follow-up skipped: connection closed connId=${entry.connId} sessionId=${sessionId}`,
-      );
-      // Try next entry
-      await this.processQueuedFollowUps(sessionId);
-      return;
-    }
+      // Skip entries whose connection has disconnected
+      if (!this.wsManager.getConnection(entry.connId)) {
+        this.logger.debug(
+          `[ws][cloud] follow-up skipped: connection closed connId=${entry.connId} sessionId=${sessionId}`,
+        );
+        continue;
+      }
 
-    const session = await this.db
-      .selectFrom('sessions')
-      .selectAll()
-      .where('id', '=', sessionId)
-      .executeTakeFirst();
+      const session = await this.db
+        .selectFrom('sessions')
+        .selectAll()
+        .where('id', '=', sessionId)
+        .executeTakeFirst();
 
-    if (!session) {
-      this.logger.warn(`[ws][cloud] follow-up skipped: session not found sessionId=${sessionId}`);
-      return;
-    }
+      if (!session) {
+        this.logger.warn(`[ws][cloud] follow-up skipped: session not found sessionId=${sessionId}`);
+        return;
+      }
 
-    try {
-      await this.resumeFollowUp(entry.connId, entry.runId, sessionId, session as SessionRow, entry.prompt);
-    } catch (err) {
-      this.logger.error(
-        `[ws][cloud] processQueuedFollowUps error sessionId=${sessionId}: ${String(err)}`,
-      );
-      this.wsManager.sendToConnection(entry.connId, {
-        type: 'error',
-        code: ErrorCodes.SERVICE_ERROR,
-        message: `Failed to process queued follow-up: ${String(err)}`,
-      });
-      // Continue processing queue even on error
-      await this.processQueuedFollowUps(sessionId);
+      try {
+        await this.resumeFollowUp(entry.connId, entry.runId, sessionId, session as SessionRow, entry.prompt);
+        return; // Successfully started, exit loop
+      } catch (err) {
+        this.logger.error(
+          `[ws][cloud] processQueuedFollowUps error sessionId=${sessionId}: ${String(err)}`,
+        );
+        this.wsManager.sendToConnection(entry.connId, {
+          type: 'error',
+          code: ErrorCodes.SERVICE_ERROR,
+          message: `Failed to process queued follow-up: ${String(err)}`,
+        });
+        // Continue loop to try next entry
+      }
     }
   }
 
@@ -574,7 +604,7 @@ export class CloudRunService {
     const resumed = await this.cloudManager.resumeCloudSession(session, prompt);
     if (resumed === 'resumed') {
       this.wsManager.sendToConnection(connId, {
-        type: 'follow_up_resuming',
+        type: 'follow_up_status',
         runId,
         sessionId,
         status: 'resuming',
@@ -594,7 +624,7 @@ export class CloudRunService {
     if (resumed === 'expired') {
       // Sandbox expired, need to restart
       this.wsManager.sendToConnection(connId, {
-        type: 'follow_up_resuming',
+        type: 'follow_up_status',
         runId,
         sessionId,
         status: 'restarting',
@@ -622,28 +652,111 @@ export class CloudRunService {
    * Sends error messages to the client if validation fails.
    * Returns the run and sessionId on success, or null on failure.
    */
-  private async validateRun(connId: string, runId: string) {
-    const run = await getCloudRun(this.db, runId);
+  private async resolveChatRun(
+    connId: string,
+    conn: WSConnection,
+    chatId: string,
+    opts: { preferRunning?: boolean; requireRunning?: boolean },
+  ) {
+    const normalized = this.normalizeChatId(chatId);
+    if (!normalized) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.INVALID_MESSAGE,
+        message: 'Valid chatId is required',
+      });
+      return null;
+    }
+
+    const virtualChatId = this.buildVirtualChatId(conn.identityId!, normalized);
+    const session = await this.getLatestSessionForChatId(virtualChatId, Boolean(opts.preferRunning));
+    if (!session) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SESSION_NOT_FOUND,
+        message: 'Chat session not found',
+      });
+      return null;
+    }
+
+    if (opts.requireRunning && !['starting', 'running'].includes(session.status)) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.SESSION_NOT_FOUND,
+        message: 'No active run for this chat',
+      });
+      return null;
+    }
+
+    const run = await getCloudRunBySession(this.db, session.id);
     if (!run) {
       this.wsManager.sendToConnection(connId, {
         type: 'error',
         code: ErrorCodes.SESSION_NOT_FOUND,
-        message: 'Run not found',
+        message: 'Run not found for chat session',
       });
       return null;
     }
 
-    const sessionId = run.session_id;
-    if (!sessionId) {
+    const dbIdentityId = await this.identityResolver.resolve(conn.identityId!);
+    if (run.identity_id !== dbIdentityId) {
       this.wsManager.sendToConnection(connId, {
         type: 'error',
-        code: ErrorCodes.SESSION_NOT_FOUND,
-        message: 'Run has no associated session',
+        code: ErrorCodes.ACCESS_DENIED,
+        message: 'You do not have access to this chat',
       });
       return null;
     }
 
-    return { run, sessionId };
+    return { run, sessionId: session.id };
+  }
+
+  private async getLatestSessionForChatId(virtualChatId: string, preferRunning: boolean): Promise<SessionRow | null> {
+    if (preferRunning) {
+      const running = await getLatestSessionForChat(this.db, 'websocket', virtualChatId, ['starting', 'running']);
+      if (running) return running as SessionRow;
+    }
+    const latest = await getLatestSessionForChat(this.db, 'websocket', virtualChatId);
+    return (latest as SessionRow) ?? null;
+  }
+
+  private normalizeChatId(chatId: string | undefined): string | null {
+    if (!chatId) return null;
+    const trimmed = chatId.trim();
+    if (!trimmed) return null;
+    if (trimmed.length > 64) return null;
+    if (!/^[A-Za-z0-9._-]+$/.test(trimmed)) return null;
+    return trimmed;
+  }
+
+  private buildVirtualChatId(identityId: string, chatId: string): string {
+    return `ws:${identityId}:${chatId}`;
+  }
+
+  private async assertIdentitySessionLimits(connId: string, identityId: string): Promise<boolean> {
+    const maxTotal = this.config.security.max_sessions_per_identity;
+    const maxConcurrent = this.config.security.max_concurrent_sessions_per_identity;
+
+    const total = await countSessionsForUser(this.db, 'websocket', identityId);
+    if (total >= maxTotal) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.RATE_LIMIT,
+        message: 'Session limit reached for this identity',
+      });
+      return false;
+    }
+
+    const concurrent = await countConcurrentSessionsForUser(this.db, 'websocket', identityId);
+    if (concurrent >= maxConcurrent) {
+      this.wsManager.sendToConnection(connId, {
+        type: 'error',
+        code: ErrorCodes.RATE_LIMIT,
+        message: 'Concurrent session limit reached for this identity',
+      });
+      return false;
+    }
+    return true;
   }
 
   /**

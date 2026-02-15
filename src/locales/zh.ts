@@ -359,6 +359,7 @@ export const zh = {
   "setup.lift_failed": "Setup lift 失败：{error}",
   "setup.playground_no_repo_manage": "Playground 仓库不支持管理 setup。",
   "setup.playground_no_repo_lift": "Playground 仓库不支持 lift。",
+  "setup.lift_requires_repo": "Setup lift 需要关联代码仓库。请先选择一个仓库。",
 
   // Status
   "status.manual_snapshot": "手动",

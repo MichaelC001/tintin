@@ -11,8 +11,11 @@ import {
   upsertGithubInstallationIdentity,
   upsertGithubInstallationToken,
   getGithubInstallationToken,
+  deleteGithubInstallationToken,
 } from "./store.js";
 import { decryptSecret, encryptSecret } from "./secrets.js";
+import { startOAuthFlow } from "./oauth.js";
+import { base64Url } from "./proxy.js";
 
 const STATE_PROVIDER = "github_app";
 const TOKEN_REFRESH_BUFFER_MS = 60_000;
@@ -21,15 +24,6 @@ export interface GithubAppMetadata {
   installation_id: number;
   account_login?: string;
   account_type?: string;
-}
-
-function base64Url(input: Buffer | string): string {
-  const buf = typeof input === "string" ? Buffer.from(input, "utf8") : input;
-  return buf
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
 }
 
 function normalizePrivateKey(key: string): string {
@@ -59,6 +53,17 @@ function buildInstallUrl(cfg: CloudGithubAppSection, state: string): string {
   return `${base}/apps/${slug}/installations/new?${params.toString()}`;
 }
 
+class GitHubApiError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly responseBody: string,
+  ) {
+    super(message);
+    this.name = "GitHubApiError";
+  }
+}
+
 async function fetchJson(url: string, opts: { method?: string; headers?: Record<string, string>; body?: string }) {
   const res = await fetch(url, {
     method: opts.method ?? "GET",
@@ -67,7 +72,7 @@ async function fetchJson(url: string, opts: { method?: string; headers?: Record<
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`GitHub API failed: ${res.status} ${text}`);
+    throw new GitHubApiError(`GitHub API failed: ${res.status} ${text}`, res.status, text);
   }
   return (await res.json()) as any;
 }
@@ -84,17 +89,49 @@ async function fetchInstallationInfo(cfg: CloudGithubAppSection, installationId:
 
 async function createInstallationToken(cfg: CloudGithubAppSection, installationId: number): Promise<{ token: string; expiresAt: number | null }> {
   const url = `${cfg.api_base_url.replace(/\/+$/, "")}/app/installations/${installationId}/access_tokens`;
-  const data = await fetchJson(url, {
-    method: "POST",
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${buildGithubAppJwt(cfg)}`,
-    },
-  });
-  const token = typeof data.token === "string" ? data.token : "";
-  if (!token) throw new Error("GitHub App token missing in response");
-  const expiresAt = typeof data.expires_at === "string" ? Date.parse(data.expires_at) : null;
-  return { token, expiresAt: Number.isFinite(expiresAt) ? expiresAt : null };
+  try {
+    const data = await fetchJson(url, {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${buildGithubAppJwt(cfg)}`,
+      },
+    });
+    const token = typeof data.token === "string" ? data.token : "";
+    if (!token) throw new Error("GitHub App token missing in response");
+    const expiresAt = typeof data.expires_at === "string" ? Date.parse(data.expires_at) : null;
+    return { token, expiresAt: Number.isFinite(expiresAt) ? expiresAt : null };
+  } catch (err) {
+    if (err instanceof GitHubApiError && err.statusCode === 404) {
+      // GitHub returns 404 for both deleted installations AND invalid JWTs.
+      // Use GET /app/installations/{id} to distinguish the two cases.
+      let installationExists = false;
+      try {
+        await fetchInstallationInfo(cfg, installationId);
+        installationExists = true;
+      } catch {
+        // fetchInstallationInfo also returned 404 → installation truly missing
+      }
+      if (installationExists) {
+        throw new Error(
+          `Failed to create token for installation ${installationId}. The installation exists but token creation was rejected. Check GitHub App credentials (app_id, private_key).`,
+        );
+      }
+      throw new GitHubInstallationNotFoundError(installationId);
+    }
+    throw err;
+  }
+}
+
+export class GitHubInstallationNotFoundError extends Error {
+  public readonly installationId: number;
+  constructor(installationId: number) {
+    super(
+      `GitHub App installation ${installationId} not found. It may have been uninstalled. Please reconnect GitHub.`,
+    );
+    this.name = "GitHubInstallationNotFoundError";
+    this.installationId = installationId;
+  }
 }
 
 export function parseGithubAppMetadata(metadataJson: string | null): GithubAppMetadata | null {
@@ -171,7 +208,23 @@ export async function ensureGithubAppTokenForInstallation(opts: {
       }
     }
   }
-  const token = await createInstallationToken(opts.config, Number(installationId));
+  let token: { token: string; expiresAt: number | null };
+  try {
+    token = await createInstallationToken(opts.config, Number(installationId));
+  } catch (err) {
+    if (err instanceof GitHubInstallationNotFoundError) {
+      // P2: Reverse-mark the installation as deleted in DB to prevent repeated failures.
+      // This compensates for missed webhook deliveries.
+      await opts.db
+        .updateTable("github_installations")
+        .set({ status: "deleted", updated_at: nowMs() })
+        .where("installation_id", "=", installationId)
+        .where("status", "!=", "deleted")
+        .execute();
+      await deleteGithubInstallationToken(opts.db, installationId);
+    }
+    throw err;
+  }
   const encryptedToken = encryptSecret(token.token, opts.secretKey);
   await upsertGithubInstallationToken(opts.db, {
     installationId,
@@ -251,7 +304,7 @@ export async function handleGithubAppCallback(opts: {
   cloud: CloudSection;
   installationId: string;
   state: string;
-}): Promise<{ identityId: string; provider: string; metadataJson: string | null }> {
+}): Promise<{ identityId: string; provider: string; metadataJson: string | null; oauthRedirectUrl: string | null }> {
   const cfg = opts.cloud.github_app;
   if (!cfg) throw new Error("Missing [cloud].github_app configuration.");
   const saved = await consumeOAuthState(opts.db, STATE_PROVIDER, opts.state);
@@ -303,5 +356,20 @@ export async function handleGithubAppCallback(opts: {
     metadataJson: null,
   });
   await markIdentityOnboarded(opts.db, saved.identity_id);
-  return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null };
+
+  // Chain to OAuth flow for MCP token if GitHub App has OAuth credentials
+  let oauthRedirectUrl: string | null = null;
+  if (cfg.client_id && cfg.client_secret) {
+    const { authorizeUrl } = await startOAuthFlow({
+      db: opts.db,
+      cloud: opts.cloud,
+      provider: "github",
+      identityId: saved.identity_id,
+      redirectBase: opts.cloud.public_base_url,
+      metadataJson: saved.metadata_json ?? null,
+    });
+    oauthRedirectUrl = authorizeUrl;
+  }
+
+  return { identityId: saved.identity_id, provider: "github", metadataJson: saved.metadata_json ?? null, oauthRedirectUrl };
 }

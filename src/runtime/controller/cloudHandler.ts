@@ -22,21 +22,23 @@ import { startNotionFlow } from "../cloud/notion/oauth.js";
 import {
   getCloudRun,
   getLatestSetupSpec,
+  getOrCreatePlaygroundProject,
+  getOrCreateRepoProject,
+  getProject,
   listGithubInstallationsForIdentity,
   createPendingAction,
   consumePendingAction,
   getGithubInstallation,
   getOrCreateIdentity,
   getSharedRepo,
-  listCloudRunsForPlayground,
-  listCloudRunsForRepo,
+  listCloudRunsForProject,
   listCloudRunsForIdentity,
   listConnections,
   listReposForIdentity,
   listSecrets,
   listSharedRepos,
   replaceGithubInstallationRepos,
-  setIdentityActiveRepo,
+  setIdentityActiveProject,
   setExaApiKey,
   setParallelApiKey,
   setGithubMcpToken,
@@ -54,6 +56,7 @@ import {
   deleteGithubMcpToken,
   putSetupSpec,
 } from "../cloud/store.js";
+import { isPlayground, type Project } from "../cloud/project.js";
 import {
   completeChatgptOAuth,
   getChatgptAccountForIdentity,
@@ -64,9 +67,7 @@ import {
 import { nowMs } from "../util.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 import {
-  PLAYGROUND_REPO_ID,
   humanStatus,
-  isPlaygroundRepoId,
   isPlaygroundTarget,
   parseRepoIndex,
   truncateText,
@@ -951,7 +952,8 @@ export class CloudHandler {
       case "repo_select": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "repo_select" }>;
         if (isPlaygroundTarget(cmd.target)) {
-          await setIdentityActiveRepo(this.deps.db, identity.id, PLAYGROUND_REPO_ID);
+          const playgroundProject = await getOrCreatePlaygroundProject(this.deps.db, identity.id);
+          await setIdentityActiveProject(this.deps.db, identity.id, playgroundProject.id);
           await replyText("repo.active_set_playground", { label: t("repo.playground_label", lang) });
           return true;
         }
@@ -965,12 +967,23 @@ export class CloudHandler {
           await replyText("repo.not_found", { cmd: formatCmd("repos") });
           return true;
         }
-        await setIdentityActiveRepo(this.deps.db, identity.id, repo.id);
+        const repoProject = await getOrCreateRepoProject(this.deps.db, identity.id, repo.id, repo.name);
+        await setIdentityActiveProject(this.deps.db, identity.id, repoProject.id);
         await reply(t("repo.active_set", lang, { name: repo.name, id: repo.id }));
         return true;
       }
       case "repo_current": {
-        if (isPlaygroundRepoId(identity.active_repo_id)) {
+        const activeProject = identity.active_project_id
+          ? await getProject(this.deps.db, identity.active_project_id)
+          : null;
+        if (!activeProject) {
+          await replyText("repo.none_active", {
+            select: formatCmd("repo select"),
+            playground: formatCmd("repo select playground"),
+          });
+          return true;
+        }
+        if (activeProject.type === "playground") {
           await reply(
             t("repo.active_label", lang, {
               label: t("repo.playground_label", lang),
@@ -978,18 +991,9 @@ export class CloudHandler {
           );
           return true;
         }
-        if (!identity.active_repo_id) {
-          await replyText("repo.none_active", {
-            select: formatCmd("repo select"),
-            playground: formatCmd("repo select playground"),
-          });
-          return true;
-        }
-        const repo = await this.deps.db
-          .selectFrom("repos")
-          .selectAll()
-          .where("id", "=", identity.active_repo_id)
-          .executeTakeFirst();
+        const repo = activeProject.repo_id
+          ? await this.deps.db.selectFrom("repos").selectAll().where("id", "=", activeProject.repo_id).executeTakeFirst()
+          : null;
         if (!repo) {
           await replyText("repo.active_not_found", { cmd: formatCmd("repo select") });
           return true;
@@ -1002,7 +1006,10 @@ export class CloudHandler {
           await replyText("repo.share_dm_only", { cmd: formatCmd("repo share") });
           return true;
         }
-        if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
+        const shareProject = identity.active_project_id
+          ? await getProject(this.deps.db, identity.active_project_id)
+          : null;
+        if (!shareProject || shareProject.type === "playground" || !shareProject.repo_id) {
           await replyText("repo.none_active", {
             select: formatCmd("repo select"),
             playground: formatCmd("repo select playground"),
@@ -1012,20 +1019,20 @@ export class CloudHandler {
         const repo = await this.deps.db
           .selectFrom("repos")
           .selectAll()
-          .where("id", "=", identity.active_repo_id)
+          .where("id", "=", shareProject.repo_id)
           .executeTakeFirst();
         const shared = await shareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
           chatId: opts.chatId,
-          repoId: identity.active_repo_id,
+          repoId: shareProject.repo_id,
           sharedByIdentityId: identity.id,
         });
         if (shared.alreadyShared) {
           await replyText("repo.already_shared");
           return true;
         }
-        await replyText("repo.shared", { name: repo?.name ?? identity.active_repo_id });
+        await replyText("repo.shared", { name: repo?.name ?? shareProject.repo_id });
         return true;
       }
       case "repo_unshare": {
@@ -1033,7 +1040,10 @@ export class CloudHandler {
           await replyText("repo.unshare_dm_only", { cmd: formatCmd("repo unshare") });
           return true;
         }
-        if (!identity.active_repo_id || isPlaygroundRepoId(identity.active_repo_id)) {
+        const unshareProject = identity.active_project_id
+          ? await getProject(this.deps.db, identity.active_project_id)
+          : null;
+        if (!unshareProject || unshareProject.type === "playground" || !unshareProject.repo_id) {
           await replyText("repo.none_active", {
             select: formatCmd("repo select"),
             playground: formatCmd("repo select playground"),
@@ -1043,19 +1053,19 @@ export class CloudHandler {
         const repo = await this.deps.db
           .selectFrom("repos")
           .selectAll()
-          .where("id", "=", identity.active_repo_id)
+          .where("id", "=", unshareProject.repo_id)
           .executeTakeFirst();
         const ok = await unshareRepo(this.deps.db, {
           platform: opts.platform,
           workspaceId: opts.workspaceId,
           chatId: opts.chatId,
-          repoId: identity.active_repo_id,
+          repoId: unshareProject.repo_id,
         });
         if (!ok) {
           await replyText("repo.not_shared");
           return true;
         }
-        await replyText("repo.unshared", { name: repo?.name ?? identity.active_repo_id });
+        await replyText("repo.unshared", { name: repo?.name ?? unshareProject.repo_id });
         return true;
       }
       case "actions_list": {
@@ -1262,17 +1272,28 @@ export class CloudHandler {
       case "action_run": {
         const cmd = opts.command as Extract<CloudCommand, { kind: "action_run" }>;
         let repoIds = cmd.repoIds;
-        let playground = false;
+        // Resolve project from active_project_id or infer from context
+        let project: Project;
         if (repoIds.length === 0) {
-          if (isPlaygroundRepoId(identity.active_repo_id)) {
-            playground = true;
-          } else if (identity.active_repo_id) {
-            repoIds = [identity.active_repo_id];
+          if (identity.active_project_id) {
+            const p = await getProject(this.deps.db, identity.active_project_id);
+            if (p) {
+              project = { id: p.id, identityId: p.identity_id, type: p.type as "repo" | "playground", repoId: p.repo_id, name: p.name };
+              if (p.repo_id) repoIds = [p.repo_id];
+            } else {
+              const pg = await getOrCreatePlaygroundProject(this.deps.db, identity.id);
+              project = { id: pg.id, identityId: pg.identity_id, type: pg.type as "repo" | "playground", repoId: pg.repo_id, name: pg.name };
+            }
           } else {
-            playground = true;
+            const pg = await getOrCreatePlaygroundProject(this.deps.db, identity.id);
+            project = { id: pg.id, identityId: pg.identity_id, type: pg.type as "repo" | "playground", repoId: pg.repo_id, name: pg.name };
           }
+        } else {
+          const repo = await this.deps.db.selectFrom("repos").select("name").where("id", "=", repoIds[0]!).executeTakeFirst();
+          const rp = await getOrCreateRepoProject(this.deps.db, identity.id, repoIds[0]!, repo?.name ?? "repo");
+          project = { id: rp.id, identityId: rp.identity_id, type: rp.type as "repo" | "playground", repoId: rp.repo_id, name: rp.name };
         }
-        if (!playground) {
+        if (!isPlayground(project)) {
           const repos = await listReposForIdentity(this.deps.db, identity.id);
           const repoIdSet = new Set(repos.map((r) => r.id));
           for (const id of repoIds) {
@@ -1311,9 +1332,9 @@ export class CloudHandler {
             spaceId: opts.spaceId,
             userId: opts.userId,
             prompt,
+            project,
             repoIds,
             agent,
-            playground,
           });
           const link = this.buildCloudUiLink(result.runId, identity.id, opts.isDirect);
           const vscodeUrl = await this.deps.cloudManager.getVscodeUrl(result.sessionId);
@@ -1343,15 +1364,14 @@ export class CloudHandler {
         return true;
       }
       case "setup_status": {
-        if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await replyText("setup.playground_no_repo_manage");
-          return true;
-        }
-        if (!identity.active_repo_id) {
+        const setupProject = identity.active_project_id
+          ? await getProject(this.deps.db, identity.active_project_id)
+          : null;
+        if (!setupProject) {
           await replyText("repo.none_active_simple");
           return true;
         }
-        const spec = await getLatestSetupSpec(this.deps.db, identity.active_repo_id);
+        const spec = await getLatestSetupSpec(this.deps.db, setupProject.id);
         if (!spec) {
           await replyText("setup.no_spec", { cmd: formatCmd("setup lift") });
           return true;
@@ -1360,16 +1380,15 @@ export class CloudHandler {
         return true;
       }
       case "setup_lift": {
-        if (isPlaygroundRepoId(identity.active_repo_id)) {
-          await replyText("setup.playground_no_repo_lift");
-          return true;
-        }
-        if (!identity.active_repo_id) {
-          await replyText("repo.none_active_simple");
+        const liftProject = identity.active_project_id
+          ? await getProject(this.deps.db, identity.active_project_id)
+          : null;
+        if (!liftProject || liftProject.type === "playground" || !liftProject.repo_id) {
+          await replyText("setup.lift_requires_repo");
           return true;
         }
         try {
-          const repo = await this.deps.db.selectFrom("repos").selectAll().where("id", "=", identity.active_repo_id).executeTakeFirstOrThrow();
+          const repo = await this.deps.db.selectFrom("repos").selectAll().where("id", "=", liftProject.repo_id).executeTakeFirstOrThrow();
           const conn = await this.deps.db.selectFrom("connections").selectAll().where("id", "=", repo.connection_id).executeTakeFirstOrThrow();
           const provider = new LocalCloudProvider(cloud.workspaces_dir, this.deps.logger);
           const workspace = await provider.createWorkspace({ prefix: "lift" });
@@ -1397,7 +1416,7 @@ export class CloudHandler {
           const spec = await generateSetupSpecFromPath(path.join(workspace.rootPath, "repo"));
           const yml = stringifySetupSpec(spec);
           const hash = hashSetupSpec(yml);
-          await putSetupSpec(this.deps.db, { repoId: repo.id, ymlBlob: yml, hash });
+          await putSetupSpec(this.deps.db, { projectId: liftProject.id, ymlBlob: yml, hash });
           await provider.terminateWorkspace(workspace);
           await replyText("setup.lift_saved");
         } catch (e) {

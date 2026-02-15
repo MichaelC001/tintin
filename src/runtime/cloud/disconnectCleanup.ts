@@ -80,7 +80,7 @@ export async function loadDisconnectScope(
     .execute();
   const repoIds = repoRows.map((row) => row.id);
 
-  // Find runs associated with these repos
+  // Find runs associated with these repos (via cloud_run_repos and project_id)
   const runIds = new Set<string>();
   if (repoIds.length > 0) {
     const runRepoRows = await db
@@ -90,12 +90,21 @@ export async function loadDisconnectScope(
       .execute();
     for (const row of runRepoRows) runIds.add(row.run_id);
 
-    const primaryRows = await db
-      .selectFrom("cloud_runs")
+    // Find projects linked to these repos, then find runs by project_id
+    const projectRows = await db
+      .selectFrom("projects")
       .select(["id"])
-      .where("primary_repo_id", "in", repoIds)
+      .where("repo_id", "in", repoIds)
       .execute();
-    for (const row of primaryRows) runIds.add(row.id);
+    const projectIds = projectRows.map((p) => p.id);
+    if (projectIds.length > 0) {
+      const projectRunRows = await db
+        .selectFrom("cloud_runs")
+        .select(["id"])
+        .where("project_id", "in", projectIds)
+        .execute();
+      for (const row of projectRunRows) runIds.add(row.id);
+    }
   }
   const runIdList = Array.from(runIds);
 
@@ -212,15 +221,24 @@ export async function executeCleanupTransaction(
 
   // Clean up repos and related data
   if (scope.repoIds.length > 0) {
-    await trx
-      .updateTable("identities")
-      .set({ active_repo_id: null, updated_at: now })
-      .where("active_repo_id", "in", scope.repoIds)
+    // Clear active_project_id for projects linked to these repos
+    const linkedProjects = await trx
+      .selectFrom("projects")
+      .select("id")
+      .where("repo_id", "in", scope.repoIds)
       .execute();
+    const projectIds = linkedProjects.map((p) => p.id);
+    if (projectIds.length > 0) {
+      await trx
+        .updateTable("identities")
+        .set({ active_project_id: null, updated_at: now })
+        .where("active_project_id", "in", projectIds)
+        .execute();
+      // Runs linked to these projects will be deleted below via scope.runIds
+    }
     await trx.deleteFrom("shared_repos").where("repo_id", "in", scope.repoIds).execute();
-    await trx.deleteFrom("setup_specs").where("repo_id", "in", scope.repoIds).execute();
+    await trx.deleteFrom("setup_specs").where("project_id", "in", projectIds).execute();
     await trx.deleteFrom("cloud_run_repos").where("repo_id", "in", scope.repoIds).execute();
-    await trx.updateTable("cloud_runs").set({ primary_repo_id: null }).where("primary_repo_id", "in", scope.repoIds).execute();
     await trx.deleteFrom("repos").where("id", "in", scope.repoIds).execute();
   }
 

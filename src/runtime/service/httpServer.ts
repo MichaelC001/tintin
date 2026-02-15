@@ -31,6 +31,7 @@ import { verifySlackSignature } from "../platform/slack.js";
 import { SLACK_INSTALL_PATH, SLACK_OAUTH_REDIRECT_PATH, handleSlackInstall, handleSlackOauthCallback } from "../slack/oauth.js";
 import { handleAgentRoutes } from "./http/agentRoutes.js";
 import { handleCloudApiRoutes } from "./http/cloudApiRoutes.js";
+import { handleGithubApiRoutes, extractReturnUrl } from "./http/githubRoutes.js";
 
 const buildChatgptOauthSuccessHtml = (lang: UserLanguage): string => {
   const title = escapeHtml(t("chatgpt.oauth.success_title", lang));
@@ -94,7 +95,6 @@ export type CreateHttpServerDeps = {
   notifyGithubConnected: (metadataJson: string | null) => Promise<void>;
   notifyNotionConnected: (metadataJson: string | null) => Promise<void>;
   notifyChatgptConnected: (metadataJson: string | null) => Promise<void>;
-  notifyWebSocketOAuthComplete: (metadataJson: string | null, provider: string, identityId: string) => Promise<void>;
 };
 
 export function createHttpServer(deps: CreateHttpServerDeps) {
@@ -245,6 +245,24 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
         return;
       }
 
+      if (
+        await handleGithubApiRoutes({
+          deps: {
+            config,
+            db,
+            logger,
+            cloudManager: deps.cloudManager,
+          },
+          req,
+          res,
+          url,
+          pathname,
+          pathParts,
+        })
+      ) {
+        return;
+      }
+
       if (config.cloud?.proxy?.enabled) {
         if (pathname.startsWith(config.cloud.proxy.openai_path)) {
           await handleProxyRequest({
@@ -373,9 +391,19 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
           }
           try {
             const result = await handleGithubAppCallback({ db, cloud: config.cloud, installationId, state });
-            await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
-            await deps.notifyGithubConnected(result.metadataJson);
-            sendText(res, 200, "Connected. Return to the chat.");
+            if (result.oauthRedirectUrl) {
+              res.writeHead(302, { Location: result.oauthRedirectUrl });
+              res.end();
+            } else {
+              const returnUrl = extractReturnUrl(result.metadataJson);
+              if (returnUrl) {
+                res.writeHead(302, { Location: returnUrl });
+                res.end();
+              } else {
+                await deps.notifyGithubConnected(result.metadataJson);
+                sendText(res, 200, "Connected. Return to the chat.");
+              }
+            }
           } catch (e) {
             sendText(res, 400, `GitHub App connect failed: ${String(e)}`);
           }
@@ -392,14 +420,19 @@ export function createHttpServer(deps: CreateHttpServerDeps) {
             provider === "notion"
               ? await handleNotionCallback({ db, config, code, state, logger })
               : await handleOAuthCallback({ db, cloud: config.cloud, provider, code, state });
-          await deps.notifyWebSocketOAuthComplete(result.metadataJson, result.provider, result.identityId);
-          if (result.provider === "github") {
-            await deps.notifyGithubConnected(result.metadataJson);
+          const returnUrl = extractReturnUrl(result.metadataJson);
+          if (returnUrl) {
+            res.writeHead(302, { Location: returnUrl });
+            res.end();
+          } else {
+            if (result.provider === "github") {
+              await deps.notifyGithubConnected(result.metadataJson);
+            }
+            if (result.provider === "notion") {
+              await deps.notifyNotionConnected(result.metadataJson);
+            }
+            sendText(res, 200, "Connected. Return to the chat.");
           }
-          if (result.provider === "notion") {
-            await deps.notifyNotionConnected(result.metadataJson);
-          }
-          sendText(res, 200, "Connected. Return to the chat.");
         } catch (e) {
           sendText(res, 400, `OAuth failed: ${String(e)}`);
         }

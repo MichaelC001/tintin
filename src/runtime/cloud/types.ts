@@ -47,3 +47,14 @@ export function mapDbStatusToWsStatus(dbStatus: CloudRunDbStatus | string): Clou
  * Browser session provider types.
  */
 export type BrowserProvider = "browserbase" | "hyperbrowser";
+
+/**
+ * Impact summary for GitHub disconnect operations.
+ */
+export interface GitHubDisconnectImpact {
+  repos: number;
+  runs: number;
+  sessions: number;
+  screenshots: number;
+  snapshots: number;
+}

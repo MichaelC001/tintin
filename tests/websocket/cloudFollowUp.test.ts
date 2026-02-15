@@ -81,6 +81,7 @@ function createMockDb(opts: MockDbOptions = {}) {
       selectAll: () => createChainableMock(table),
       select: () => createChainableMock(table),
       where: () => createChainableMock(table),
+      orderBy: () => createChainableMock(table),
       executeTakeFirst: async () => getResult(),
       execute: async () => {
         const r = getResult();
@@ -115,6 +116,10 @@ function createMockConfig(): AppConfig {
       default_agent: "codex",
       ui_base_url: "https://example.com",
     },
+    security: {
+      max_sessions_per_identity: 1000,
+      max_concurrent_sessions_per_identity: 100,
+    },
   } as unknown as AppConfig;
 }
 
@@ -136,7 +141,7 @@ function createMockConnection(identityId = "ws-identity-123"): WSConnection {
 function makeFollowUpMessage(overrides: Partial<CloudFollowUpMessage> = {}): CloudFollowUpMessage {
   return {
     type: "cloud_follow_up",
-    runId: "run-123",
+    chatId: "chat-123",
     prompt: "Follow-up prompt",
     ...overrides,
   };
@@ -145,7 +150,7 @@ function makeFollowUpMessage(overrides: Partial<CloudFollowUpMessage> = {}): Clo
 // ============ Tests ============
 
 test("CloudRunService handleCloudFollowUp - parameter validation", async (t) => {
-  await t.test("should return error when runId is missing", async () => {
+  await t.test("should return error when chatId is missing", async () => {
     const wsManager = createMockWsManager();
     const service = new CloudRunService(
       wsManager, createMockCloudManager(), createMockConfig(), createMockDb(), createMockLogger(),
@@ -153,7 +158,7 @@ test("CloudRunService handleCloudFollowUp - parameter validation", async (t) => 
 
     await service.handleCloudFollowUp(
       "conn-1", createMockConnection(),
-      makeFollowUpMessage({ runId: "" }),
+      makeFollowUpMessage({ chatId: "" }),
     );
 
     const msgs = wsManager._getSentMessages();
@@ -161,7 +166,7 @@ test("CloudRunService handleCloudFollowUp - parameter validation", async (t) => 
     assert.ok(err);
     if (err?.message.type === "error") {
       assert.equal(err.message.code, "INVALID_MESSAGE");
-      assert.equal(err.message.message, "Run ID required");
+      assert.equal(err.message.message, "Chat ID required");
     }
   });
 
@@ -206,9 +211,19 @@ test("CloudRunService handleCloudFollowUp - parameter validation", async (t) => 
 });
 
 test("CloudRunService handleCloudFollowUp - ownership validation", async (t) => {
-  await t.test("should return error when run does not exist", async () => {
+  await t.test("should return error when run does not exist for chat session", async () => {
     const wsManager = createMockWsManager();
-    const db = createMockDb({ cloudRun: null });
+    const db = createMockDb({
+      cloudRun: null,
+      session: {
+        id: "session-456",
+        status: "finished",
+        agent: "codex",
+        codex_session_id: "csid-1",
+        codex_cwd: "/workspace",
+        project_id: "cloud:test",
+      },
+    });
     const service = new CloudRunService(
       wsManager, createMockCloudManager(), createMockConfig(), db, createMockLogger(),
     );
@@ -223,7 +238,7 @@ test("CloudRunService handleCloudFollowUp - ownership validation", async (t) => 
     assert.ok(err);
     if (err?.message.type === "error") {
       assert.equal(err.message.code, "SESSION_NOT_FOUND");
-      assert.equal(err.message.message, "Run not found");
+      assert.equal(err.message.message, "Run not found for chat session");
     }
   });
 
@@ -237,6 +252,14 @@ test("CloudRunService handleCloudFollowUp - ownership validation", async (t) => 
         status: "finished",
         provider: "modal",
         workspace_id: "ws-1",
+      },
+      session: {
+        id: "session-456",
+        status: "finished",
+        agent: "codex",
+        codex_session_id: "csid-1",
+        codex_cwd: "/workspace",
+        project_id: "cloud:test",
       },
     });
     const service = new CloudRunService(
@@ -315,9 +338,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
     );
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.find((m) => m.message.type === "follow_up_queued");
-    assert.ok(queued, "should send follow_up_queued");
-    if (queued?.message.type === "follow_up_queued") {
+    const queued = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(queued, "should send follow_up_status");
+    if (queued?.message.type === "follow_up_status") {
       assert.equal(queued.message.runId, "run-123");
       assert.equal(queued.message.sessionId, "session-456");
       assert.equal(queued.message.position, 1);
@@ -340,8 +363,8 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
     );
 
     const msgs = wsManager._getSentMessages();
-    const queued = msgs.find((m) => m.message.type === "follow_up_queued");
-    assert.ok(queued, "should send follow_up_queued");
+    const queued = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(queued, "should send follow_up_status");
   });
 
   await t.test("should call resumeCloudSession when session is finished", async () => {
@@ -368,9 +391,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
 
     assert.ok(resumeCalled, "resumeCloudSession should be called");
     const msgs = wsManager._getSentMessages();
-    const resuming = msgs.find((m) => m.message.type === "follow_up_resuming");
-    assert.ok(resuming, "should send follow_up_resuming");
-    if (resuming?.message.type === "follow_up_resuming") {
+    const resuming = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(resuming, "should send follow_up_status");
+    if (resuming?.message.type === "follow_up_status") {
       assert.equal(resuming.message.status, "resuming");
     }
   });
@@ -425,9 +448,9 @@ test("CloudRunService handleCloudFollowUp - session status handling", async (t) 
 
     assert.ok(restartCalled, "restartCloudSession should be called");
     const msgs = wsManager._getSentMessages();
-    const resuming = msgs.find((m) => m.message.type === "follow_up_resuming");
-    assert.ok(resuming, "should send follow_up_resuming");
-    if (resuming?.message.type === "follow_up_resuming") {
+    const resuming = msgs.find((m) => m.message.type === "follow_up_status");
+    assert.ok(resuming, "should send follow_up_status");
+    if (resuming?.message.type === "follow_up_status") {
       assert.equal(resuming.message.status, "restarting");
     }
   });

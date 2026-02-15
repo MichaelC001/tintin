@@ -3,7 +3,6 @@ export { WebSocketManager } from './manager.js';
 export { WebSocketHandler } from './handler.js';
 export { requireAuth } from './guards.js';
 export type { AuthenticatedConnection } from './guards.js';
-export { GitHubService } from './services/index.js';
 export type {
   // Client → Server messages
   AuthMessage,
@@ -11,9 +10,7 @@ export type {
   PingMessage,
   ClientMessage,
   // Server → Client messages
-  AuthOkMessage,
-  AuthErrorMessage,
-  SessionStartedMessage,
+  AuthResultMessage,
   ChunkMessage,
   ToolCallMessage,
   ToolOutputMessage,

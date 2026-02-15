@@ -359,6 +359,7 @@ export const en = {
   "setup.lift_failed": "Setup lift failed: {error}",
   "setup.playground_no_repo_manage": "Playground repo does not support setup management.",
   "setup.playground_no_repo_lift": "Playground repo cannot be lifted.",
+  "setup.lift_requires_repo": "Setup lift requires a repo project. Select a repo first.",
 
   // Status
   "status.manual_snapshot": "manual",

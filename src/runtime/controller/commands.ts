@@ -1,7 +1,6 @@
 import type { SessionAgent, SessionStatus } from "../db.js";
 import { t, type UserLanguage } from "../../locales/index.js";
 
-export const PLAYGROUND_REPO_ID = "__playground__";
 
 export type SessionListIntent = { statuses?: SessionStatus[]; page: number };
 
@@ -117,9 +116,6 @@ export function parseRepoIndex(target: string): number | null {
   return n;
 }
 
-export function isPlaygroundRepoId(value: string | null | undefined): boolean {
-  return value === PLAYGROUND_REPO_ID;
-}
 
 export function isPlaygroundTarget(value: string): boolean {
   const cleaned = value.trim().toLowerCase().replace(/[.)]$/, "");

@@ -296,46 +296,6 @@ export async function createBotService(deps: BotServiceDeps) {
     }
   };
 
-  /**
-   * Notify WebSocket client about OAuth completion
-   */
-  const notifyWebSocketOAuthComplete = async (
-    metadataJson: string | null,
-    provider: string,
-    identityId: string,
-  ): Promise<void> => {
-    if (!metadataJson || !wsManager) return;
-    try {
-      const wsMetadata = JSON.parse(metadataJson);
-      if (!wsMetadata.connection_id) return;
-
-      // Get account login for GitHub providers
-      let accountLogin: string | undefined;
-      if (provider === "github") {
-        // For GitHub, account_login is stored in github_installations via the connection's installation_id
-        const connection = await db
-          .selectFrom("connections")
-          .innerJoin("github_installations", "connections.installation_id", "github_installations.installation_id")
-          .select(["github_installations.account_login"])
-          .where("connections.identity_id", "=", identityId)
-          .where("connections.type", "like", "github%")
-          .orderBy("connections.created_at", "desc")
-          .executeTakeFirst();
-        accountLogin = connection?.account_login ?? undefined;
-      }
-
-      wsManager.sendToConnection(wsMetadata.connection_id, {
-        type: 'auth_status',
-        provider,
-        connected: true,
-        accountLogin,
-      });
-      logger.info(`Sent auth_status to WebSocket connection ${wsMetadata.connection_id}`);
-    } catch {
-      // Ignore parse errors
-    }
-  };
-
   const notifyChatgptConnected = async (metadataJson: string | null) => {
     const metadata = parseCloudConnectMetadata(metadataJson);
     if (!metadata) return;
@@ -396,7 +356,19 @@ export async function createBotService(deps: BotServiceDeps) {
     sendToSession,
     async (id) => streamer.drainSession(id),
     mcpRegistry,
-    cloudManager ? async (sessionId, status) => cloudManager.handleSessionFinished(sessionId, status) : undefined,
+    cloudManager
+      ? async (sessionId, status) => {
+          await cloudManager.handleSessionFinished(sessionId, status);
+          // WS: mark sandbox ready and drain follow-up queue
+          if (wsManager) {
+            const connId = wsManager.getConnectionBySession(sessionId);
+            if (connId && wsHandler?.sandboxLifecycleService) {
+              wsHandler.sandboxLifecycleService.markReady(connId);
+              wsHandler.cloudService?.processQueuedFollowUps(sessionId);
+            }
+          }
+        }
+      : undefined,
   );
   if (cloudManager) cloudManager.attachSessionManager(sessionManager);
   if (cloudManager) await cloudManager.start();
@@ -433,14 +405,6 @@ export async function createBotService(deps: BotServiceDeps) {
         wsHandler!.cloudService?.cleanupConnection(connId);
         await sandboxService.terminateSandbox(connId, conn);
       });
-
-      // Wire sandbox completion to follow-up queue processing
-      const cloudService = wsHandler.cloudService;
-      if (cloudService) {
-        sandboxService.setOnSessionComplete((sessionId) => {
-          void cloudService.processQueuedFollowUps(sessionId);
-        });
-      }
     }
 
     wsManager.startHeartbeat();
@@ -493,7 +457,6 @@ export async function createBotService(deps: BotServiceDeps) {
     notifyGithubConnected,
     notifyNotionConnected,
     notifyChatgptConnected,
-    notifyWebSocketOAuthComplete,
   });
 
   // WebSocket upgrade handler
